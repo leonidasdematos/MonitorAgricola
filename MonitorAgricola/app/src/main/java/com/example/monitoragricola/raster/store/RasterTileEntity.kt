@@ -1,8 +1,6 @@
 package com.example.monitoragricola.raster.store
 
-import androidx.room.ColumnInfo
 import androidx.room.Entity
-import androidx.room.PrimaryKey
 
 /**
  * Chave composta (jobId, tx, ty).
@@ -13,8 +11,6 @@ import androidx.room.PrimaryKey
     primaryKeys = ["jobId", "tx", "ty"]
 )
 data class RasterTileEntity(
-    @PrimaryKey(autoGenerate = false)
-    val id: Long,            // jobId<<32 ^ (tx & 0xffffffff) ^ (ty & 0xffffffffL) <<< ver helper abaixo
     val jobId: Long,
     val tx: Int,
     val ty: Int,

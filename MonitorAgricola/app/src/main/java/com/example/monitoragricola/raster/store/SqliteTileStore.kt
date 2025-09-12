@@ -1,17 +1,24 @@
 // =============================================
 // file: com/example/monitoragricola/raster/SqliteTileStore.kt
 // =============================================
-package com.example.monitoragricola.raster
+package com.example.monitoragricola.raster.store
 
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-import android.util.Log
+import com.example.monitoragricola.raster.RasterSnapshot
+import com.example.monitoragricola.raster.SnapshotTile
+import com.example.monitoragricola.raster.StoreTile
+import com.example.monitoragricola.raster.TileData
+import com.example.monitoragricola.raster.TileKey
+import com.example.monitoragricola.raster.TileStore
+import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.zip.Deflater
 import java.util.zip.Inflater
+
 
 class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : TileStore {
     private val helper = object : SQLiteOpenHelper(context.applicationContext, dbName, null, 1) {
@@ -39,11 +46,21 @@ class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : Ti
             val speed = c.getBlob(5)?.let { decompressFloatArray(it) }
             val lastStrokeId = c.getBlob(6)?.let { decompressShortArray(it) } ?: return null
             val frontStamp = c.getBlob(7)?.let { decompressShortArray(it) }
-            return StoreTile(tx, ty, rev, layerMask, count, sections, rate, speed, lastStrokeId, frontStamp)
-        }
+            return StoreTile(
+                tx = tx,
+                ty = ty,
+                rev = rev,
+                count = count,
+                sections = sections,
+                rate = rate,
+                speed = speed,
+                lastStrokeId = lastStrokeId,
+                frontStamp = frontStamp,
+                layerMask = layerMask
+            )        }
     }
 
-    override fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {
+    override suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {
         if (list.isEmpty()) return
         val db = helper.writableDatabase
         db.beginTransaction()
@@ -70,7 +87,7 @@ class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : Ti
         }
     }
 
-    override fun snapshot(meta: RasterSnapshot) {
+    fun snapshot(meta: RasterSnapshot) {
         val db = helper.writableDatabase
         db.beginTransaction()
         try {
@@ -85,15 +102,24 @@ class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : Ti
 
             // Persist tiles
             val pairs = meta.tiles.map { st ->
-                val td = TileData(meta.tileSize, st.count, st.sections, st.rate, st.speed, st.lastStrokeId, st.frontStamp, st.layerMask).apply { rev = st.rev }
+                val td = TileData(
+                    meta.tileSize,
+                    st.count,
+                    st.sections,
+                    st.rate,
+                    st.speed,
+                    st.lastStrokeId,
+                    st.frontStamp,
+                    st.layerMask
+                ).apply { rev = st.rev }
                 TileKey(st.tx, st.ty) to td
             }
-            saveDirtyTilesAndClear(pairs)
+            kotlinx.coroutines.runBlocking { saveDirtyTilesAndClear(pairs) }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }
 
-    override fun restore(): RasterSnapshot? {
+    fun restore(): RasterSnapshot? {
         val db = helper.readableDatabase
         var meta: RasterSnapshot? = null
         db.rawQuery("SELECT originLat,originLon,resolutionM,tileSize FROM snapshot_meta WHERE id=1", emptyArray()).use { c ->
@@ -123,7 +149,7 @@ class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : Ti
         return meta
     }
 
-    override fun clear() {
+    fun clear() {
         helper.writableDatabase.execSQL("DELETE FROM tiles"); helper.writableDatabase.execSQL("DELETE FROM snapshot_meta")
     }
 

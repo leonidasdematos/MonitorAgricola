@@ -11,6 +11,8 @@ import com.example.monitoragricola.raster.RasterSnapshot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import com.example.monitoragricola.raster.store.RasterDatabase
+
 
 class App : Application() {
 
@@ -43,6 +45,15 @@ class App : Application() {
             .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
     }
+
+    val rasterDb: RasterDatabase by lazy {
+        Room.databaseBuilder(
+            applicationContext,
+            RasterDatabase::class.java,
+            "raster.db"
+        ).build()
+    }
+
 
     // Repo
     val jobsRepository: JobsRepository by lazy {

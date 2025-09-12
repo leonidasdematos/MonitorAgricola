@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 
 
+
 /**
  * Engine HOT ∪ VIZ (memória efetiva = tiles próximos do trator + tiles visíveis no viewport).
  *
