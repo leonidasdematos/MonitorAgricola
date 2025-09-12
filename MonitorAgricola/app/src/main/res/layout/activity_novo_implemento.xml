@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:id="@+id/containerForm"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Nome do Implemento"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/etNomeImplemento"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tipo de Implemento"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <Spinner
+            android:id="@+id/spinnerTipoImplemento"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Modo de Rastro -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Modelo de Rastro"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginTop="12dp" />
+
+        <Spinner
+            android:id="@+id/spinnerModoRastro"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Distância única (para FIXO e ENTRADA_COMPENSADA) já existe:
+             etDistanciaAntena (mantém) -->
+
+        <!-- Campos dinâmicos (aparecem somente no ARTICULADO) -->
+        <LinearLayout
+            android:id="@+id/containerArticulado"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:layout_marginTop="4dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Antena → Articulação (m)" />
+
+            <EditText
+                android:id="@+id/etDistAntenaArticulacao"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="numberDecimal"
+                android:hint="Ex: 1.20" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Articulação → Referência do Implemento (m)" />
+
+            <EditText
+                android:id="@+id/etDistArticulacaoImplemento"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="numberDecimal"
+                android:hint="Ex: 6.00" />
+        </LinearLayout>
+
+        <!-- Campos específicos serão adicionados dinamicamente aqui -->
+        <LinearLayout
+            android:id="@+id/containerCamposEspecificos"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Distância Antena → Implemento (m)"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginTop="12dp"/>
+
+        <EditText
+            android:id="@+id/etDistanciaAntena"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="numberDecimal"
+            android:hint="Ex: 2.5" />
+
+        <Button
+            android:id="@+id/btnConfigAvancadas"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Configurações Avançadas"
+            android:layout_marginTop="12dp"/>
+
+        <LinearLayout
+            android:id="@+id/containerConfigAvancadas"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Offset Lateral (m)" />
+
+            <EditText
+                android:id="@+id/etOffsetLateral"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="numberDecimal"
+                android:hint="Negativo = esquerda / Positivo = direita" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Offset Longitudinal (m)" />
+
+            <EditText
+                android:id="@+id/etOffsetLongitudinal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="numberDecimal"
+                android:hint="Frente (+) / Trás (-)" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Modo de Cadastro"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/rgModoCadastro"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="16dp">
+
+            <RadioButton
+                android:id="@+id/rbManual"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Manual"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/rbAutomatico"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Automático"
+                android:enabled="false" />
+
+        </RadioGroup>
+
+        <Button
+            android:id="@+id/btnSalvarImplemento"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Salvar Implemento" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,1459 @@
+// com/example/monitoragricola/ui/MainActivity.kt
+package com.example.monitoragricola.ui
+
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.MotionEvent
+import android.widget.ImageButton
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
+import androidx.lifecycle.lifecycleScope
+import com.example.monitoragricola.R
+import com.example.monitoragricola.implementos.ImplementoSelector
+import com.example.monitoragricola.implementos.ImplementosPrefs
+import com.example.monitoragricola.implementos.ImplementoSnapshot
+import com.example.monitoragricola.jobs.JobEventType
+import com.example.monitoragricola.map.*
+import com.example.monitoragricola.ui.routes.RoutesActivity
+import kotlinx.coroutines.*
+import org.osmdroid.config.Configuration
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.gestures.RotationGestureOverlay
+import kotlin.math.*
+import android.Manifest
+import android.content.pm.PackageManager.PERMISSION_GRANTED
+import android.graphics.Color
+import android.util.Log
+import android.view.View
+import android.view.WindowManager
+
+// Raster
+import com.example.monitoragricola.raster.RasterCoverageEngine
+import com.example.monitoragricola.raster.RasterCoverageOverlay
+import com.example.monitoragricola.raster.HotVizMode
+
+private const val TAG_RASTER = "RASTER"
+
+class MainActivity : AppCompatActivity() {
+    private var lastStatsLog = 0L
+
+
+    /* ======================= DI / Jobs ======================= */
+    private val app by lazy { application as com.example.monitoragricola.App }
+    private val jobManager get() = app.jobManager
+    private val jobRecorder get() = app.jobRecorder
+    private val jobsRepo get() = app.jobsRepository
+
+
+
+    /** ID do job selecionado (pode estar ACTIVE ou PAUSED). */
+    private var selectedJobId: Long? = null
+    /** Se está gravando (play/pause do botão). */
+    private var isWorking = false
+    // no topo da classe
+    private var coldStart = true
+
+    private val statePrefs by lazy { getSharedPreferences("main_state", MODE_PRIVATE) }
+    private var lastWorkingFlag: Boolean = false
+
+
+    /* ======================= Mapa / Raster ======================= */
+    private lateinit var map: MapView
+    private lateinit var tractor: Marker
+
+    private lateinit var rasterEngine: RasterCoverageEngine
+    private lateinit var rasterOverlay: RasterCoverageOverlay
+
+    private var mapReady = false
+
+    /* ======================= UI ======================= */
+    private lateinit var tvVelocidade: TextView
+    private lateinit var tvImplemento: TextView
+    private lateinit var tvArea: TextView
+    private lateinit var tvSobreposicao: TextView
+    private lateinit var btnConfig: ImageButton
+    private lateinit var btnImplementos: ImageButton
+    private lateinit var btnLigar: ImageButton
+    private lateinit var btnRotas: ImageButton
+    private lateinit var btnTrabalhos: ImageButton
+    private lateinit var tvJobState: TextView
+    private lateinit var tvLinhaAlvo: TextView
+    private lateinit var tvErroLateral: TextView
+    private var speedEmaKmh: Double? = null   // filtro exponencial da velocidade
+
+
+
+    private var followTractor = true
+    private val followDelayMs = 8000L
+    private val followHandler = Handler(Looper.getMainLooper())
+
+    /* ======================= Loop / posição ======================= */
+    private val handler = Handler(Looper.getMainLooper())
+    private val updateInterval = 10L
+
+    private var lastPoint: GeoPoint? = null
+    private var interpolatedPosition: GeoPoint? = null
+    private val interpolationFactor = 0.2f
+    private var lastHeading: Float = 0f
+
+    private var keptRunningInBackground = false
+    private var mapLoopStarted = false
+
+    private var activeImplemento: Implemento? = null
+    private var positionProvider: PositionProvider? = null
+    private var simulatorProvider: TractorSimulatorProvider? = null
+
+    private var lastSpeedCalcTime: Long = 0
+    private var lastSpeedPoint: GeoPoint? = null
+
+    private var lastPositionMillis: Long = 0L
+    private var isSignalLost: Boolean = false
+    private val SIGNAL_LOSS_THRESHOLD_MS = 6_000L
+
+    private var currentMinDistMeters: Double = 0.25
+
+    /* ======================= Rotas ======================= */
+    private var routeRenderer: com.example.monitoragricola.jobs.routes.RouteRenderer? = null
+    private var activeRoute: com.example.monitoragricola.jobs.routes.db.JobRouteEntity? = null
+    private var refCenterWkb: ByteArray? = null
+    private var pendingA: GeoPoint? = null
+    private var pendingB: GeoPoint? = null
+    private var activeRouteId: Long? = null
+    private val routePolylines = mutableListOf<org.osmdroid.views.overlay.Polyline>()
+    private var implementBar: org.osmdroid.views.overlay.Polyline? = null
+    private var implementLink: org.osmdroid.views.overlay.Polyline? = null
+    private var refStartSeq: Int? = null
+    private var refEndSeq: Int? = null
+
+    private var pendingRestore = false
+
+
+    /* ======================= Permissão ======================= */
+    private val requestLocationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) startGpsProvider()
+            else Toast.makeText(this, "Permissão de localização negada", Toast.LENGTH_SHORT).show()
+        }
+
+    /* ======================= Ciclo de vida ======================= */
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Configuration.getInstance().userAgentValue = packageName
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        setContentView(R.layout.activity_main)
+
+        coldStart = (savedInstanceState == null) // só é true no primeiro launch desse processo/atividade
+
+
+        map = findViewById(R.id.map)
+        tvVelocidade = findViewById(R.id.tvVelocidade)
+        tvImplemento = findViewById(R.id.tvImplemento)
+        tvArea = findViewById(R.id.tvArea)
+        tvSobreposicao = findViewById(R.id.tvSobreposicao)
+        btnConfig = findViewById(R.id.btnConfigTop)
+        btnLigar = findViewById(R.id.btnLigar)
+        btnRotas = findViewById(R.id.btnRotas)
+        btnTrabalhos = findViewById(R.id.btnTrabalhos)
+        tvJobState = findViewById(R.id.tvJobState)
+        tvLinhaAlvo = findViewById(R.id.tvLinhaAlvo)
+        tvErroLateral = findViewById(R.id.tvErroLateral)
+        btnImplementos = findViewById(R.id.btnImplementos)
+
+
+        val container = findViewById<ConstraintLayout>(R.id.container)
+        ViewCompat.setOnApplyWindowInsetsListener(container) { view, insets ->
+            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.updatePadding(top = sys.top, bottom = sys.bottom)
+            insets
+        }
+
+        restorePlayState()
+        syncPlayUi()
+        setupMap()
+        setupButtons()
+        refreshJobsButtonColor()
+        refreshImplementosButtonColor()
+        refreshPlayButtonColor()
+
+    }
+
+    override fun onStart() {
+        super.onStart()
+
+        btnLigar.setImageResource(
+            if (isWorking) android.R.drawable.ic_media_pause
+            else android.R.drawable.ic_media_play
+        )
+
+        lifecycleScope.launch {
+            // 1) Retomada vinda da TrabalhosActivity
+            val intentJobId = intent.getLongExtra("resume_job_id", -1L)
+            if (intentJobId > 0) {
+                isWorking = false
+                persistPlayState()
+                btnLigar.setImageResource(android.R.drawable.ic_media_play)
+
+                val job = withContext(Dispatchers.IO) { jobManager.get(intentJobId) }
+
+                val importFree = intent.getBooleanExtra("import_free_mode", false)
+                if (importFree) {
+                    val snap = app.freeModeRaster
+                    if (snap != null) {
+                        // 1) Carrega o snapshot do modo livre no engine atual
+                        rasterEngine.importSnapshot(snap)
+                        // 2) Salva no job (vira o “estado inicial” do job)
+                        job?.let { safeJob ->
+                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, rasterEngine) }
+                        }                        // 3) Opcional: NÃO apague o freeModeRaster aqui — a ideia é não perder o modo livre
+                        //    (ele só é limpo quando o usuário quiser explicitamente).
+                    }
+                }
+
+
+                if (job == null) {
+                    Toast.makeText(this@MainActivity, "Trabalho não encontrado.", Toast.LENGTH_SHORT).show()
+                } else {
+                    // força snapshot do job e persiste seleção
+                    selectImplementoFromJob(job)
+                    selectedJobId = job.id
+                    ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
+
+                    // Restaura cobertura raster no mapa (pausado)
+                    restoreRasterOnMap(job.id)
+
+                    btnLigar.setImageResource(android.R.drawable.ic_media_play)
+                    refreshJobsButtonColor()
+                    refreshImplementosButtonColor()
+                    refreshPlayButtonColor()
+                    refreshJobState()
+                    Toast.makeText(this@MainActivity, "Trabalho selecionado (aguardando ▶).", Toast.LENGTH_SHORT).show()
+                    clearResumeExtras()
+                }
+                syncPlayUi()
+                clearResumeExtras()
+                return@launch
+            }
+
+            // 2) recupera último estado persistido
+            if (selectedJobId == null) {
+                // modo livre
+                ImplementoSelector.clearForce(this@MainActivity)
+
+                ImplementoSelector.currentSnapshot(this@MainActivity)?.let { snap ->
+                    val impl = buildImplementoFromSnapshot(snap)
+                    selectImplemento(impl, origin = "manual")
+                } ?: run {
+                    activeImplemento?.stop()
+                    activeImplemento = null
+                    tvImplemento.text = "Nenhum implemento selecionado"
+                }
+
+                // NÃO chame clearRasterFromMap() aqui.
+                // Se houver snapshot do modo livre, já injeta no engine e redesenha:
+                app.freeModeRaster?.let { snap ->
+                    rasterEngine.importSnapshot(snap)
+                    rasterOverlay.invalidateTiles()
+                    map.invalidate()
+                } ?: run {
+                    // se não tiver snapshot, apenas garanta o redraw
+                    rasterEngine.invalidateTiles()
+                    map.invalidate()
+                }
+            } else {
+                // reaplica força e cobertura raster (pausado)
+                val selId = selectedJobId!!
+                ensureSelectedForceApplied(selId)
+                restoreRasterOnMap(selId)
+            }
+
+            refreshJobsButtonColor()
+            refreshImplementosButtonColor()
+            refreshPlayButtonColor()
+            refreshJobState()
+            syncPlayUi()
+
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        map.onResume()
+
+        // Restaura o estado salvo (1ª abertura ou recriação de processo)
+        restorePlayState()
+
+        if (coldStart) {
+            // 🔒 Sempre começar pausado no 1º launch "do zero"
+            isWorking = false
+            persistPlayState()
+            coldStart = false
+        }
+
+        val fonte = getSharedPreferences("configs", MODE_PRIVATE)
+            .getString("fonteCoordenada", "gps")
+
+        val skipRestore = keptRunningInBackground
+        keptRunningInBackground = false
+
+        if (skipRestore) {
+            // ✅ Rodando em background: NÃO recrie providers/implemento/raster.
+            // Apenas sincronize UI e mantenha tudo como estava.
+            lastWorkingFlag = isWorking
+
+            // Providers só se estiverem nulos (caso o SO os tenha matado)
+            when (fonte) {
+                "gps", "rtk" -> if (positionProvider == null) checkLocationPermission()
+                "simulador" -> if (positionProvider == null) {
+                    simulatorProvider = TractorSimulatorProvider(map, tractor)
+                    positionProvider  = simulatorProvider
+                    activeImplemento?.let { simulatorProvider?.setImplemento(it) } // não chama start()
+                    positionProvider?.start()
+                }
+            }
+
+            // UI
+            refreshJobsButtonColor()
+            refreshImplementosButtonColor()
+            refreshPlayButtonColor()
+            syncPlayUi() // atualiza ícone/label
+            if (!mapLoopStarted) { startMapUpdates(); mapLoopStarted = true }
+
+            return
+        }
+
+        // ====== Fluxo normal (NÃO estava rodando em bg): pode recriar ======
+        lastWorkingFlag = isWorking
+
+        // Reset providers/caches (garante estado limpo)
+        positionProvider?.stop(); positionProvider = null
+        simulatorProvider?.stop(); simulatorProvider = null
+        resetCache()
+
+        selectedJobId = ImplementosPrefs.getSelectedJobId(this)
+
+        // Implemento / UI (não altera isWorking aqui)
+        val snap = ImplementoSelector.currentSnapshot(this)
+        val hasForced = (ImplementosPrefs.getForcedSnapshot(this) != null)
+        if (snap == null) {
+            tvImplemento.text = "Nenhum implemento selecionado"
+            activeImplemento?.stop()
+            activeImplemento = null
+        } else {
+            tvImplemento.text = if (hasForced) "Implemento (Job): ${snap.nome}" else "Implemento: ${snap.nome}"
+            val impl = buildImplementoFromSnapshot(snap)
+
+            // Se estiver forçado por Job, restaure o estado runtime (articulação etc.) ANTES de aplicar
+            val selId = selectedJobId
+            if (hasForced && selId != null) {
+                (impl as? ImplementoBase)?.importRuntimeState(app.implementoStateStore.load(selId))
+            }
+
+            // selectImplemento respeita isWorking (start/stop coerente)
+            selectImplemento(impl, origin = if (hasForced) "forced" else "manual")
+        }
+
+        // Fonte de posição
+        when (fonte) {
+            "gps", "rtk" -> checkLocationPermission()
+            "simulador" -> {
+                simulatorProvider = TractorSimulatorProvider(map, tractor)
+                positionProvider  = simulatorProvider
+                activeImplemento?.let { simulatorProvider?.setImplemento(it) } // não chama start()
+                positionProvider?.start()
+            }
+        }
+
+        // Restore do raster quando o mapa estiver pronto
+        if (mapReady) {
+            tryRestoreSelectedJobRaster()
+        } else {
+            pendingRestore = true
+        }
+
+        if (!mapLoopStarted) {
+            startMapUpdates()
+            mapLoopStarted = true
+        }
+
+        refreshJobsButtonColor()
+        refreshImplementosButtonColor()
+        refreshPlayButtonColor()
+        syncPlayUi()
+    }
+
+
+
+    override fun onStop() {
+        super.onStop()
+
+        try { flushRasterSync("onStop") } catch (_: Throwable) {}
+
+        val shouldKeep = isWorking && !isFinishing
+        if (!shouldKeep) {
+            positionProvider?.stop()
+            simulatorProvider?.stop()
+            handler.removeCallbacksAndMessages(null)
+            persistPlayState()
+            stopCheckpointLoop()
+        }
+
+        // << NOVO: se for modo livre, persista o snapshot ao parar
+        if (selectedJobId == null) {
+            runCatching {
+                val snap = rasterEngine.exportSnapshot()
+                app.freeModeRaster = snap
+            }
+        }
+    }
+
+    override fun onPause() {
+        // 1) snapshot rápido raster antes de sair
+        val selId = selectedJobId
+        if (selId != null) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching { jobManager.saveRaster(selId, rasterEngine) }
+            }
+        } else {
+            // modo livre: ainda usamos snapshot em memória
+            val snap = runCatching { rasterEngine.exportSnapshot() }.getOrNull()
+            if (snap != null) app.freeModeRaster = snap
+        }
+
+        // 2) decidir background
+        val keep = isWorking && !isFinishing
+        keptRunningInBackground = keep
+
+        if (!keep) {
+            positionProvider?.stop()
+            simulatorProvider?.stop()
+            handler.removeCallbacksAndMessages(null)
+            stopCheckpointLoop()
+            mapLoopStarted = false
+        }
+
+        selectedJobId?.let { id ->
+            (activeImplemento as? ImplementoBase)?.exportRuntimeState()?.let { st ->
+                app.implementoStateStore.save(id, st)
+            }
+        }
+        persistPlayState()
+        super.onPause()
+    }
+
+    /* ======================= Setup ======================= */
+
+    private fun setupMap() {
+        map.setMultiTouchControls(true)
+
+        val startPoint = GeoPoint(-23.4000, -54.2000)
+        map.controller.setZoom(23.0)
+        map.controller.setCenter(startPoint)
+
+        val rotationGestureOverlay = RotationGestureOverlay(map).apply { isEnabled = true }
+        map.overlays.add(rotationGestureOverlay)
+
+        // Engine e overlay: crie uma vez
+        rasterEngine = RasterCoverageEngine().apply {
+            startJob(
+                originLat = startPoint.latitude,
+                originLon = startPoint.longitude,
+                resolutionM = 0.10,
+                tileSize = 256
+            )
+            setMode(HotVizMode.COBERTURA) // <- força visualização de cobertura
+
+            Log.d(
+                TAG_RASTER,
+                "Engine startJob: origin=(${currentOriginLat()}, ${currentOriginLon()}) res=${currentResolutionM()} tile=${currentTileSize()}"
+            )
+        }
+        rasterOverlay = RasterCoverageOverlay(map, rasterEngine)
+
+        // Adicione o raster antes do trator, para o trator ficar por cima
+        map.overlays.add(rasterOverlay)
+
+        tractor = Marker(map).apply {
+            position = startPoint
+            title = getString(R.string.trator)
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            icon = android.graphics.drawable.BitmapDrawable(resources, makeGnssAntennaBitmap(56))
+            setInfoWindow(null)
+        }
+        map.overlays.add(tractor)
+
+        // Marca quando o mapa tiver dimensões reais
+        map.addOnFirstLayoutListener { _, _, _, _, _ ->
+            mapReady = true
+            if (pendingRestore) {
+                pendingRestore = false
+                tryRestoreSelectedJobRaster()   // roda o restore agora que o mapa está pronto
+            } else {
+                // força primeiro redraw mesmo sem restore
+                rasterEngine.invalidateTiles()
+                // se seu overlay tiver invalidateTiles(), pode chamar aqui também:
+                // rasterOverlay.invalidateTiles()
+                map.invalidate()
+            }
+        }
+    }
+
+
+    private fun setupButtons() {
+        btnRotas.setOnClickListener { startActivity(Intent(this, RoutesActivity::class.java)) }
+        btnRotas.setOnLongClickListener { mostrarAtalhoRotasAB(btnRotas); true }
+        btnConfig.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
+        btnTrabalhos.setOnClickListener { startActivity(Intent(this, TrabalhosActivity::class.java)) }
+
+        btnConfig.setOnLongClickListener {
+            rasterEngine.setMode(HotVizMode.COBERTURA)
+            rasterOverlay.invalidateTiles()
+            map.invalidate()
+            true
+        }
+
+        btnImplementos.setOnClickListener {
+            val hasJob = ImplementosPrefs.getSelectedJobId(this) != null
+            if (hasJob) {
+                Toast.makeText(this, "Há um trabalho selecionado. Volte ao modo livre para trocar implemento.", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            startActivity(Intent(this, ImplementosActivity::class.java))
+        }
+
+        btnTrabalhos.setOnLongClickListener {
+            lifecycleScope.launch {
+                val active = jobManager.getActive()
+                val hasActive = active != null
+                val options = mutableListOf<String>()
+                if (hasActive) {
+                    if (isWorking) { options += "Pausar trabalho"; options += "Finalizar trabalho" }
+                    else           { options += "Retomar trabalho"; options += "Finalizar trabalho" }
+                }
+                options += "Criar novo trabalho"
+                options += "Abrir lista de trabalhos"
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Atalhos de Trabalhos")
+                    .setItems(options.toTypedArray()) { _, which ->
+                        when (options[which]) {
+                            "Retomar trabalho" -> active?.let { job ->
+                                lifecycleScope.launch {
+                                    selectImplementoFromJob(job)
+                                    selectedJobId = job.id
+                                    refreshJobsButtonColor()
+                                    refreshImplementosButtonColor()
+                                    refreshPlayButtonColor()
+                                    withContext(Dispatchers.IO) { jobManager.resume(job.id) }
+                                    isWorking = true
+                                    persistPlayState()
+                                    syncPlayUi()
+                                    btnLigar.setImageResource(android.R.drawable.ic_media_pause)
+                                    startCheckpointLoop()
+                                    Toast.makeText(this@MainActivity, "Trabalho retomado", Toast.LENGTH_SHORT).show()
+                                    refreshJobState()
+                                }
+                            }
+                            "Pausar trabalho" -> active?.let { job ->
+                                lifecycleScope.launch {
+                                    jobManager.saveRaster(job.id, rasterEngine)
+                                    jobManager.pause(job.id)
+                                    isWorking = false
+                                    persistPlayState()
+                                    syncPlayUi()
+                                    stopCheckpointLoop()
+                                    btnLigar.setImageResource(android.R.drawable.ic_media_play)
+                                    Toast.makeText(this@MainActivity, "Trabalho pausado", Toast.LENGTH_SHORT).show()
+                                    refreshJobState()
+                                    refreshJobsButtonColor()
+                                    refreshImplementosButtonColor()
+                                    refreshPlayButtonColor()
+                                }
+                            }
+                            "Finalizar trabalho" -> active?.let { job ->
+                                lifecycleScope.launch {
+                                    val areas = rasterEngine.getAreas()
+                                    jobManager.saveRaster(job.id, rasterEngine)
+                                    jobManager.finish(job.id, areas.totalM2, areas.overlapM2)
+                                    ImplementoSelector.clearForce(this@MainActivity)
+                                    ImplementosPrefs.clearSelectedJobId(this@MainActivity)
+                                    selectedJobId = null
+                                    isWorking = false
+                                    persistPlayState()
+                                    syncPlayUi()
+                                    stopCheckpointLoop()
+                                    btnLigar.setImageResource(android.R.drawable.ic_media_play)
+                                    Toast.makeText(this@MainActivity, "Trabalho finalizado", Toast.LENGTH_SHORT).show()
+                                    refreshJobState()
+                                    refreshJobsButtonColor()
+                                    refreshImplementosButtonColor()
+                                    refreshPlayButtonColor()
+                                }
+                            }
+                            "Criar novo trabalho" -> startActivity(Intent(this@MainActivity, TrabalhosActivity::class.java))
+                            "Abrir lista de trabalhos" -> startActivity(Intent(this@MainActivity, TrabalhosActivity::class.java))
+                        }
+                    }
+                    .show()
+            }
+            true
+        }
+
+        btnLigar.setOnClickListener {
+            isWorking = !isWorking
+            btnLigar.isSelected = isWorking
+            lifecycleScope.launch {
+                val selId = selectedJobId
+                val job = if (selId != null) withContext(Dispatchers.IO) { jobManager.get(selId) } else null
+
+                if (isWorking) {
+                    if (job == null) {
+                        // MODO LIVRE
+                        activeImplemento?.start()
+                        btnLigar.setImageResource(android.R.drawable.ic_media_pause)
+                        Toast.makeText(this@MainActivity, "Modo livre iniciado. Para gravar, vá em Trabalhos e crie um novo.", Toast.LENGTH_SHORT).show()
+                        refreshJobState()
+                    } else {
+                        val currentSnap = ImplementoSelector.currentSnapshot(this@MainActivity)
+                        val forcedSnap  = try { com.google.gson.Gson().fromJson(job.implementoSnapshotJson, ImplementoSnapshot::class.java) } catch (_: Throwable) { null }
+
+                        val isSame =
+                            currentSnap != null && forcedSnap != null &&
+                                    currentSnap.tipo?.lowercase() == forcedSnap.tipo?.lowercase() &&
+                                    currentSnap.numLinhas == forcedSnap.numLinhas &&
+                                    (currentSnap.larguraTrabalhoM ?: 0f) == (forcedSnap.larguraTrabalhoM ?: 0f) &&
+                                    (currentSnap.espacamentoM    ?: 0f) == (forcedSnap.espacamentoM    ?: 0f)
+
+                        if (!isSame) {
+                            selectImplementoFromJob(job)
+                        } else {
+                            ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
+                        }
+
+                        activeImplemento?.start()
+                        btnLigar.setImageResource(android.R.drawable.ic_media_pause)
+                        withContext(Dispatchers.IO) { jobManager.resume(selId!!) }
+                        startCheckpointLoop()
+                        Toast.makeText(this@MainActivity, "Trabalho retomado", Toast.LENGTH_SHORT).show()
+                        refreshJobState()
+                    }
+                } else {
+                    // salvar estado do implemento (ex.: theta articulado)
+                    val st = (activeImplemento as? ImplementoBase)?.exportRuntimeState()
+                    if (st != null && selId != null) app.implementoStateStore.save(selId, st)
+
+                    activeImplemento?.stop()
+                    btnLigar.setImageResource(android.R.drawable.ic_media_play)
+
+                    selId?.let {
+                        jobManager.saveRaster(it, rasterEngine)
+                        //val areas = rasterEngine.getAreas()
+                        withContext(Dispatchers.IO) { jobManager.pause(it) }
+                        stopCheckpointLoop()
+                        Toast.makeText(this@MainActivity, "Trabalho pausado", Toast.LENGTH_SHORT).show()
+                    } ?: run {
+                        stopCheckpointLoop()
+                        Toast.makeText(this@MainActivity, "Pausado (modo livre)", Toast.LENGTH_SHORT).show()
+                    }
+                    refreshJobState()
+                }
+                persistPlayState()
+                syncPlayUi()
+            }
+        }
+
+        // Desativar follow ao interagir no mapa
+        map.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN ||
+                event.action == MotionEvent.ACTION_MOVE ||
+                event.action == MotionEvent.ACTION_POINTER_DOWN
+            ) disableFollowTemporarily()
+            false
+        }
+    }
+
+    /* ======================= Loop do mapa ======================= */
+    private fun startMapUpdates() {
+        handler.post(object : Runnable {
+            override fun run() {
+                positionProvider?.getCurrentPosition()?.let { pos ->
+                    lastPositionMillis = System.currentTimeMillis()
+                    if (isSignalLost) {
+                        isSignalLost = false
+                        lifecycleScope.launch { logSignalEvent(lost = false) }
+                        Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
+                    }
+
+                    interpolatedPosition = interpolatedPosition?.let {
+                        val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
+                        val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
+                        GeoPoint(lat, lon)
+                    } ?: pos
+
+                    val currentPos = interpolatedPosition!!
+                    tractor.position = currentPos
+                    rasterEngine.updateTractorHotCenter(currentPos.latitude, currentPos.longitude)
+
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastStatsLog > 2000) {
+                        val s = rasterEngine.debugStats()
+                        Log.d("RASTER",
+                            "tileSize=${s.tileSize} res=${"%.2f".format(s.resolutionM)} " +
+                                    "HOTr=${s.hotRadius} dataTiles=${s.tilesDataCount} " +
+                                    "HOT=${s.hotCount} VIZ=${s.vizCount} bmpLRU=${s.bmpLruSize} dataLRU=${s.dataLruSize}"
+                        )
+                        lastStatsLog = now
+                    }
+
+
+                    val implBase = activeImplemento as? ImplementoBase
+                    if (lastWorkingFlag != isWorking) {
+                        if (isWorking) implBase?.start() else implBase?.stop()
+                        lastWorkingFlag = isWorking
+                    }
+
+                    lastPoint?.let { last ->
+                        val dist = last.distanceToAsDouble(currentPos)
+                        if (dist > 0.01) {
+                            val heading = calculateBearing(last, currentPos)
+                            val diff = ((heading - lastHeading + 540) % 360) - 180
+                            if (abs(diff) > 0.1f && followTractor) {
+                                lastHeading = (lastHeading + diff + 360) % 360
+                                map.setMapOrientation(-lastHeading)
+                            }
+                        }
+                    }
+
+                    if (followTractor) map.controller.setCenter(currentPos)
+
+                    rasterEngine.updateTractorHotCenter(currentPos.latitude, currentPos.longitude)
+                    rasterEngine.updateViewport(map.boundingBox)
+
+                    // Sempre atualiza o estado do implemento (barra, centro, articulação).
+                    // O ImplementoBase só pinta raster se estiver rodando (running=true).
+                    activeImplemento?.updatePosition(lastPoint, currentPos)
+
+                    // Só grava telemetria do job quando estiver trabalhando.
+                    if (isWorking) {
+
+                        selectedJobId?.let { id ->
+                            jobRecorder.onTick(
+                                jobId = id,
+                                lat = currentPos.latitude,
+                                lon = currentPos.longitude,
+                                tMillis = System.currentTimeMillis(),
+                                speedKmh = null,
+                                headingDeg = lastHeading
+                            )
+                        }
+                    }
+
+                    tvVelocidade.text = calcularVelocidadeCache(currentPos)
+                    ajustarAmostragemPorVelocidade()
+
+                    // métricas vindas do raster
+                    val areas = rasterEngine.getAreas()
+                    tvArea.text = "Área: ${formatArea(areas.totalM2)}"
+                    tvSobreposicao.text = "Sobreposição: ${formatArea(areas.overlapM2)}"
+
+                    // guias de rota (inalterado)
+                    val route = activeRoute
+                    if (route != null && routeRenderer != null) {
+                        val guidance = routeRenderer?.update(
+                            route = route,
+                            refLineWkb = refCenterWkb,
+                            tractorPos = currentPos,
+                            spacingM = route.spacingM.toDouble()
+                        )
+                        guidance?.let {
+                            if (::tvLinhaAlvo.isInitialized) tvLinhaAlvo.text = "Linha: ${it.laneIdx}"
+                            if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
+                        }
+                    }
+
+                    updateImplementBarOverlay(lastPoint, currentPos)
+                    lastPoint = currentPos
+                }
+
+                val now = System.currentTimeMillis()
+                if (!isSignalLost && lastPositionMillis > 0 && (now - lastPositionMillis) > SIGNAL_LOSS_THRESHOLD_MS) {
+                    isSignalLost = true
+                    lifecycleScope.launch { logSignalEvent(lost = true) }
+                    Toast.makeText(this@MainActivity, "Sinal de posição perdido", Toast.LENGTH_SHORT).show()
+                }
+
+                handler.postDelayed(this, updateInterval)
+            }
+        })
+    }
+
+    /* ======================= Checkpoint / sinal ======================= */
+    private var checkpointJob: Job? = null
+    private val CHECKPOINT_INTERVAL_MS = 180_000L // 3 min
+
+    private fun startCheckpointLoop() {
+        checkpointJob?.cancel()
+        checkpointJob = lifecycleScope.launch {
+            while (isActive && isWorking) {
+                try {
+                    val id = selectedJobId
+                    if (id != null) {
+                        jobManager.saveRaster(id, rasterEngine)
+                    } else {
+                        // Modo livre: checkpoint rápido em memória
+                        val snap = rasterEngine.exportSnapshot()
+                        app.freeModeRaster = snap
+                    }
+                } catch (_: Throwable) { /* silencioso */ }
+                delay(CHECKPOINT_INTERVAL_MS)
+            }
+        }
+    }
+
+
+    private fun stopCheckpointLoop() {
+        checkpointJob?.cancel()
+        checkpointJob = null
+    }
+
+    private suspend fun logSignalEvent(lost: Boolean) {
+        val id = selectedJobId ?: return
+        val type = if (lost) JobEventType.SIGNAL_LOST.name else JobEventType.SIGNAL_BACK.name
+        jobsRepo.addEvent(
+            com.example.monitoragricola.jobs.db.JobEventEntity(
+                jobId = id,
+                t = System.currentTimeMillis(),
+                type = type
+            )
+        )
+    }
+
+    /* ======================= Implemento ======================= */
+
+    private fun buildImplementoFromSnapshot(snap: ImplementoSnapshot): Implemento {
+        val tipo = snap.tipo?.lowercase()
+        val linhas = (snap.numLinhas ?: 0).coerceAtLeast(0)
+        var largura = snap.larguraTrabalhoM
+        var espac   = snap.espacamentoM
+
+        if (espac <= 0f && largura > 0f && linhas > 0) espac = largura / linhas
+        if (largura <= 0f && linhas > 0 && espac > 0f) largura = linhas * espac
+        if ((tipo == "plantadeira") && linhas > 0 && (largura < 0.2f)) {
+            if (espac <= 0f) espac = 0.45f
+            largura = linhas * espac
+        }
+
+        val num = if (linhas > 0) linhas else if (espac > 0f && largura > 0f)
+            max(1, round(largura / espac).toInt()) else 1
+
+        return when (tipo) {
+            "plantadeira" -> com.example.monitoragricola.map.Plantadeira(
+                rasterEngine = rasterEngine,
+                numLinhas = num,
+                espacamento = espac,
+                distanciaAntena = snap.distanciaAntenaM ?: 0f,
+                modoRastro = snap.modoRastro,
+                distAntenaArticulacao = snap.distAntenaArticulacaoM,
+                distArticulacaoImplemento = snap.distArticulacaoImplementoM,
+                offsetLateral = snap.offsetLateralM ?: 0f,
+                offsetLongitudinal = snap.offsetLongitudinalM ?: 0f
+            )
+            else -> com.example.monitoragricola.map.Plantadeira(
+                rasterEngine = rasterEngine,
+                numLinhas = num,
+                espacamento = espac,
+                distanciaAntena = snap.distanciaAntenaM ?: 0f,
+                offsetLateral = snap.offsetLateralM ?: 0f,
+                offsetLongitudinal = snap.offsetLongitudinalM ?: 0f
+            )
+        }
+    }
+
+    /** Seleciona/força o implemento do job, marca como selecionado e aplica. */
+    private fun selectImplementoFromJob(job: com.example.monitoragricola.jobs.db.JobEntity) {
+        val snap = try {
+            com.google.gson.Gson().fromJson(job.implementoSnapshotJson, ImplementoSnapshot::class.java)
+        } catch (_: Throwable) { null } ?: return
+
+        ImplementoSelector.forceFromJob(this, snap)
+        ImplementosPrefs.setSelectedJobId(this, job.id)
+        selectedJobId = job.id
+
+        val impl = buildImplementoFromSnapshot(snap)
+        (impl as? ImplementoBase)?.importRuntimeState(app.implementoStateStore.load(job.id))
+        selectImplemento(impl, origin = "forced")
+    }
+
+    private fun ensureSelectedForceApplied(selId: Long) {
+        val forced = ImplementosPrefs.getForcedSnapshot(this)
+        if (forced != null) return
+        lifecycleScope.launch {
+            val job = withContext(Dispatchers.IO) { jobManager.get(selId) } ?: return@launch
+            selectImplementoFromJob(job)
+            refreshJobsButtonColor()
+            refreshImplementosButtonColor()
+            refreshPlayButtonColor()
+        }
+    }
+
+    private fun selectImplemento(impl: Implemento, origin: String) {
+        val prevJobId = selectedJobId
+        val prevState = (activeImplemento as? ImplementoBase)?.exportRuntimeState()
+        if (prevJobId != null && prevState != null) app.implementoStateStore.save(prevJobId, prevState)
+
+        activeImplemento?.stop()
+        activeImplemento = impl
+
+        // Se veio de Job, garanta que runtime state (articulação) seja importado antes de start/stop
+        if (origin == "forced" && selectedJobId != null) {
+            (impl as? ImplementoBase)?.importRuntimeState(app.implementoStateStore.load(selectedJobId!!))
+        }
+
+        val status = runCatching { impl.getStatus() }.getOrNull()
+        val nome = (status?.get("nome") as? String) ?: "Implemento"
+        tvImplemento.text = if (origin == "forced") "Implemento (Job): $nome" else "Implemento: $nome"
+
+        if (positionProvider === simulatorProvider) simulatorProvider?.setImplemento(impl) // não chama start()
+
+        if (isWorking) impl.start() else impl.stop()
+        map.invalidate()
+    }
+
+
+    private fun releaseForcedAndApplyManualIfAny() {
+        ImplementoSelector.clearForce(this)
+        ImplementosPrefs.clearSelectedJobId(this)
+        selectedJobId = null
+
+        val snap = ImplementoSelector.currentSnapshot(this)
+        if (snap != null) {
+            val impl = buildImplementoFromSnapshot(snap)
+            selectImplemento(impl, origin = "manual")
+        } else {
+            activeImplemento?.stop()
+            activeImplemento = null
+            tvImplemento.text = "Nenhum implemento selecionado"
+            map.invalidate()
+        }
+        refreshJobsButtonColor()
+        refreshImplementosButtonColor()
+        refreshPlayButtonColor()
+    }
+
+    private fun refreshJobsButtonColor() {
+        btnTrabalhos.isSelected = ImplementosPrefs.getSelectedJobId(this) != null
+    }
+
+    /* ======================= Raster helpers ======================= */
+
+    private fun restoreRasterOnMap(jobId: Long) {
+        lifecycleScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                // Novo fluxo: injeta direto no engine; true se encontrou e carregou
+                jobManager.loadRasterInto(jobId, rasterEngine)
+            }
+
+            if (!ok) {
+                // Primeiro uso do job (ou não há snapshot salvo): ancora o engine
+                val c = map.mapCenter
+                rasterEngine.startJob(
+                    c.latitude,
+                    c.longitude,
+                    resolutionM = 0.10,
+                    tileSize = 256
+                )
+            }
+
+            rasterOverlay.invalidateTiles()
+            map.invalidate()
+        }
+    }
+
+
+    private fun clearRasterFromMap() {
+        rasterEngine.clearCoverage()
+        rasterOverlay.invalidateTiles()
+        app.freeModeRaster = null
+        map.invalidate()
+    }
+
+    /* ======================= UI helpers ======================= */
+
+    private fun calcularVelocidadeCache(current: GeoPoint): String {
+        val now = System.currentTimeMillis()
+        val last = lastSpeedPoint
+        val lastTime = lastSpeedCalcTime
+
+        // thresholds para reduzir jitter
+        val minDtSec = 0.20          // não atualiza mais rápido que 5 Hz
+        val minDistM = 0.05          // ignora passos menores que 5 cm
+        val alpha = 0.35             // EMA: 0..1 (maior = responde mais rápido)
+
+        var vKmhToShow = 0.0
+
+        if (last != null && lastTime > 0) {
+            val dtSec = ((now - lastTime) / 1000.0).coerceAtLeast(1e-3)
+            val distM = last.distanceToAsDouble(current)
+
+            // Só atualiza cálculo se passou tempo/distância suficientes
+            if (dtSec >= minDtSec && distM >= minDistM) {
+                val instKmh = (distM / dtSec) * 3.6
+                speedEmaKmh = when (val prev = speedEmaKmh) {
+                    null -> instKmh
+                    else -> prev + alpha * (instKmh - prev)
+                }
+                lastSpeedPoint = current
+                lastSpeedCalcTime = now
+            }
+
+            vKmhToShow = speedEmaKmh ?: 0.0
+        } else {
+            // primeira amostra: inicializa marcadores
+            lastSpeedPoint = current
+            lastSpeedCalcTime = now
+            vKmhToShow = 0.0
+        }
+
+        // Telemetria para o raster (grava por-pixel quando pinta)
+        rasterEngine.updateSpeed(
+            if (vKmhToShow > 0.0) vKmhToShow.toFloat() else null
+        )
+
+        return String.format("%.1f km/h", vKmhToShow)
+    }
+
+
+    private fun ajustarAmostragemPorVelocidade() {
+        val vKmh = tvVelocidade.text.toString()
+            .substringAfter(" ").substringBefore(" ").toDoubleOrNull() ?: 0.0
+
+        val targetMinDist = when {
+            vKmh > 12.0 -> 0.50
+            vKmh > 6.0  -> 0.35
+            else        -> 0.25
+        }
+        if (abs(targetMinDist - currentMinDistMeters) > 0.01) {
+            currentMinDistMeters = targetMinDist
+            jobRecorder.setSampling(minDistanceMeters = currentMinDistMeters)
+        }
+    }
+
+    private fun formatArea(areaM2: Double): String = when {
+        areaM2 < 10_000     -> "%.0f m²".format(areaM2)
+        areaM2 < 1_000_000  -> "%.1f Ha".format(areaM2 / 10_000.0)
+        else                -> "%.0f Ha".format(areaM2 / 10_000.0)
+    }
+
+    private fun disableFollowTemporarily() {
+        followTractor = false
+        followHandler.removeCallbacks(followRunnable)
+        followHandler.postDelayed(followRunnable, followDelayMs)
+    }
+
+    private val followRunnable = Runnable {
+        followTractor = true
+        lastPoint?.let { last ->
+            interpolatedPosition?.let { current ->
+                val heading = calculateBearing(last, current)
+                map.setMapOrientation(-heading)
+                lastHeading = heading
+            }
+        }
+    }
+
+    private fun calculateBearing(start: GeoPoint, end: GeoPoint): Float {
+        val lat1 = Math.toRadians(start.latitude)
+        val lon1 = Math.toRadians(start.longitude)
+        val lat2 = Math.toRadians(end.latitude)
+        val lon2 = Math.toRadians(end.longitude)
+        val dLon = lon2 - lon1
+        val y = sin(dLon) * cos(lat2)
+        val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        var bearing = Math.toDegrees(atan2(y, x)).toFloat()
+        if (bearing < 0) bearing += 360f
+        return bearing
+    }
+
+    private fun updateImplementBarOverlay(lastGps: GeoPoint?, currentGps: GeoPoint) {
+        val implBase = activeImplemento as? ImplementoBase ?: return
+
+        val bar = implBase.getImplementBarEndpoints() ?: return
+        val (gp1, gp2) = bar
+
+        val color = Color.argb(255, 128, 128, 128)
+        if (implementBar == null) {
+            implementBar = org.osmdroid.views.overlay.Polyline(map).apply {
+                outlinePaint.strokeWidth = 6f
+                outlinePaint.color = color
+                isGeodesic = false
+                setPoints(listOf(gp1, gp2))
+            }
+            map.overlays.add(implementBar)
+        } else {
+            implementBar?.setPoints(listOf(gp1, gp2))
+        }
+
+        val implCenter = implBase.getImplementCenter()
+        if (implCenter != null) {
+            val pts = mutableListOf<GeoPoint>()
+            val tractorPos = interpolatedPosition ?: tractor.position
+            pts += tractorPos
+            val joint = if (implBase.getPaintModel() == PaintModel.ARTICULADO) implBase.getArticulationPoint() else null
+            if (joint != null) pts += joint
+            pts += implCenter
+
+            val linkColor = Color.argb(180, 80, 80, 80)
+            if (implementLink == null) {
+                implementLink = org.osmdroid.views.overlay.Polyline(map).apply {
+                    outlinePaint.strokeWidth = 4f
+                    outlinePaint.color = linkColor
+                    isGeodesic = false
+                    setPoints(pts)
+                }
+                map.overlays.add(implementLink)
+            } else {
+                implementLink?.setPoints(pts)
+            }
+        }
+    }
+
+    private fun clearResumeExtras() { intent.removeExtra("resume_job_id") }
+
+    /* ======================= Rotas (inalteradas) ======================= */
+    private fun mostrarAtalhoRotasAB(anchor: View) {
+        val popup = android.widget.PopupMenu(this, anchor)
+        popup.menu.add(0, 1, 0, "Marcar ponto A (posição atual)")
+        popup.menu.add(0, 2, 1, "Marcar ponto B (posição atual)")
+        popup.menu.add(0, 3, 2, "Gerar linhas AB")
+        popup.menu.add(0, 4, 3, "Iniciar gravação do trilho (Curva)")
+        popup.menu.add(0, 5, 4, "Parar gravação do trilho")
+        popup.menu.add(0, 6, 5, "Gerar linhas Curvas")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> { positionProvider?.getCurrentPosition()?.let { pendingA = it; Toast.makeText(this, "Ponto A marcado", Toast.LENGTH_SHORT).show() }; true }
+                2 -> { positionProvider?.getCurrentPosition()?.let { pendingB = it; Toast.makeText(this, "Ponto B marcado", Toast.LENGTH_SHORT).show() }; true }
+                3 -> { gerarLinhasABComPreferencias(); true }
+                4 -> { iniciarGravacaoTrilho(); true }
+                5 -> { pararGravacaoTrilho(); true }
+                6 -> { gerarLinhasCurvasComPreferencias(); true }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun gerarLinhasABComPreferencias() {
+        val prefs = getSharedPreferences("routes_prefs", MODE_PRIVATE)
+        val useCustom = prefs.getBoolean("use_custom_spacing", false)
+        val spacing = if (useCustom) {
+            (prefs.getString("spacing_m_custom", null)?.toFloatOrNull()
+                ?: defaultPassWidthFromImplemento().toFloat())
+        } else {
+            defaultPassWidthFromImplemento().toFloat()
+        }
+        generateABRoute(spacing)
+    }
+
+    private fun defaultPassWidthFromImplemento(): Float {
+        ImplementoSelector.currentSnapshot(this)?.let { s ->
+            var w = s.larguraTrabalhoM
+            if (w <= 0f) {
+                val n = (s.numLinhas ?: 0)
+                val esp = s.espacamentoM
+                if (n > 0 && esp > 0f) w = n * esp
+            }
+            if (w > 0f) return w.coerceAtLeast(0.05f)
+        }
+        (simulatorProvider?.getImplementoAtual() ?: activeImplemento)?.getStatus()?.let { st ->
+            val w = (st["larguraTrabalhoM"] as? Number)?.toFloat()
+                ?: (st["largura"] as? Number)?.toFloat()
+                ?: run {
+                    val n = (st["numLinhas"] as? Number)?.toInt() ?: 0
+                    val esp = (st["espacamentoM"] as? Number)?.toFloat()
+                        ?: (st["espacamento"] as? Number)?.toFloat() ?: 0f
+                    if (n > 0 && esp > 0f) n * esp else null
+                }
+            if (w != null && w > 0f) return w.coerceAtLeast(0.05f)
+        }
+        return 3.0f
+    }
+
+    private fun generateABRoute(spacing: Float) {
+        val jobId = selectedJobId ?: run {
+            Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show(); return
+        }
+        val A = pendingA; val B = pendingB
+        if (A == null || B == null) { Toast.makeText(this, "Marque A e B antes.", Toast.LENGTH_SHORT).show(); return }
+
+        val bb = map.boundingBox
+        val projTemp = ProjectionHelper(A.latitude, A.longitude)
+        val p1 = projTemp.toLocalMeters(GeoPoint(bb.latSouth, bb.lonWest))
+        val p2 = projTemp.toLocalMeters(GeoPoint(bb.latNorth, bb.lonEast))
+        val bounds = com.example.monitoragricola.jobs.routes.RouteGenerator.BoundsMeters(
+            min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y)
+        )
+
+        val gen = com.example.monitoragricola.jobs.routes.RouteGenerator()
+        val (route, lines) = gen.generateAB(
+            A.latitude, A.longitude,
+            B.latitude, B.longitude,
+            spacing.toDouble(),
+            bounds
+        )
+
+        lifecycleScope.launch {
+            val routeId = app.routesManager.createABRoute(jobId, route, lines)
+            activeRouteId = routeId
+            activeRoute = withContext(Dispatchers.IO) {
+                app.routesRepository.activeRoutes(jobId).first { it.id == routeId }
+            }
+            refCenterWkb = null
+            if (routeRenderer == null) routeRenderer = com.example.monitoragricola.jobs.routes.RouteRenderer(map)
+            else routeRenderer?.reset()
+            positionProvider?.getCurrentPosition()?.let { pos ->
+                routeRenderer?.update(route = activeRoute!!, refLineWkb = null, tractorPos = pos, spacingM = spacing.toDouble())
+            }
+            Toast.makeText(this@MainActivity, "Rota AB criada.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun iniciarGravacaoTrilho() {
+        val jobId = selectedJobId ?: run { Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show(); return }
+        lifecycleScope.launch {
+            val start = app.jobsRepository.nextSeq(jobId)
+            refStartSeq = start
+            refEndSeq = null
+            Toast.makeText(this@MainActivity, "Gravação do trilho (seq) iniciada.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun pararGravacaoTrilho() {
+        val jobId = selectedJobId ?: run { Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show(); return }
+        lifecycleScope.launch {
+            val end = app.jobsRepository.maxSeq(jobId)
+            refEndSeq = end
+            Toast.makeText(this@MainActivity, "Gravação do trilho (seq) finalizada.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun gerarLinhasCurvasComPreferencias() {
+        val jobId = selectedJobId ?: run { Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show(); return }
+        val startSeq = refStartSeq
+        val endSeq = refEndSeq
+        if (startSeq == null || endSeq == null || endSeq < startSeq) {
+            Toast.makeText(this, "Grave um trilho (iniciar e parar) antes de gerar.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val prefs = getSharedPreferences("routes_prefs", MODE_PRIVATE)
+        val useCustom = prefs.getBoolean("use_custom_spacing", false)
+        val spacing = if (useCustom) {
+            (prefs.getString("spacing_m_custom", null)?.toDoubleOrNull()
+                ?: defaultPassWidthFromImplemento().toDouble())
+        } else {
+            defaultPassWidthFromImplemento().toDouble()
+        }.coerceAtLeast(0.05)
+
+        lifecycleScope.launch {
+            val points = withContext(Dispatchers.IO) { app.jobsRepository.getPointsBetweenSeq(jobId, startSeq, endSeq) }
+            if (points.isNullOrEmpty() || points.size < 2) {
+                withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "Trilho vazio/curto.", Toast.LENGTH_SHORT).show() }
+                return@launch
+            }
+
+            val track = points.map { p -> p.lat to p.lon }
+            val generator = com.example.monitoragricola.jobs.routes.CurveRouteGenerator()
+            val (routeBase, lines) = generator.generateFromTrack(
+                trackLatLon = track, spacingM = spacing, simplifyToleranceM = 0.10
+            )
+
+            val routeId = withContext(Dispatchers.IO) {
+                app.routesManager.createABRoute(jobId, routeBase.copy(jobId = jobId), lines)
+            }
+            activeRouteId = routeId
+            activeRoute = withContext(Dispatchers.IO) {
+                app.routesRepository.activeRoutes(jobId).first { it.id == routeId }
+            }
+            refCenterWkb = withContext(Dispatchers.IO) {
+                app.routesManager.loadLines(routeId).firstOrNull { it.idx == 0 }?.wkbLine
+            }
+
+            if (routeRenderer == null) routeRenderer = com.example.monitoragricola.jobs.routes.RouteRenderer(map)
+            else routeRenderer?.reset()
+            positionProvider?.getCurrentPosition()?.let { pos ->
+                routeRenderer?.update(route = activeRoute!!, refLineWkb = refCenterWkb, tractorPos = pos, spacingM = spacing)
+            }
+
+            Toast.makeText(this@MainActivity, "Rota CURVA criado.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /* ======================= Permissão / providers ======================= */
+
+    private fun checkLocationPermission() {
+        val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PERMISSION_GRANTED
+        if (hasFine) startGpsProvider() else requestLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+    private fun startGpsProvider() {
+        positionProvider?.stop()
+        positionProvider = GpsPositionProvider(this)
+        positionProvider?.start()
+        simulatorProvider = null
+    }
+
+    /* ======================= Bits visuais ======================= */
+
+    private fun makeGnssAntennaBitmap(size: Int): android.graphics.Bitmap {
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        val cx = size / 2f; val cy = size / 2f
+        val rOuter = size * 0.46f; val rInner = size * 0.18f
+
+        val pRing = android.graphics.Paint().apply {
+            isAntiAlias = true; style = android.graphics.Paint.Style.STROKE
+            strokeWidth = size * 0.08f; color = Color.rgb(60,60,60)
+        }
+        val pFill = android.graphics.Paint().apply { isAntiAlias = true; style = android.graphics.Paint.Style.FILL; color = Color.WHITE }
+        val pDot  = android.graphics.Paint().apply { isAntiAlias = true; style = android.graphics.Paint.Style.FILL; color = Color.rgb(0,140,255) }
+
+        c.drawCircle(cx, cy, rOuter, pFill)
+        c.drawCircle(cx, cy, rOuter, pRing)
+        c.drawCircle(cx, cy, rInner, pDot)
+        return bmp
+    }
+    private fun clearRouteOverlays() {
+        routePolylines.forEach { map.overlays.remove(it) }
+        routePolylines.clear()
+    }
+    private fun resetCache() {
+        interpolatedPosition = null
+    }
+    private fun refreshJobState() {
+    // roda em coroutine por dentro
+        val selId = selectedJobId ?: run {
+            renderJobState(null, false); return
+        }
+        lifecycleScope.launch {
+            val job = withContext(Dispatchers.IO) {
+                jobManager.get(selId)
+            }
+            if (job != null) {
+                renderJobState(job.name, isWorking)
+            } else {
+                renderJobState(null, false)
+            }
+        }
+    }
+
+    private fun renderJobState(name: String?, active: Boolean) {
+        if (name == null) {
+            tvJobState.visibility = View.GONE
+            return
+        }
+        tvJobState.visibility = View.VISIBLE
+        val estado = if (active) "Ativo" else "Pausado"
+        tvJobState.text = "Estado: $estado — $name"
+    }
+    private fun tryRestoreSelectedJobRaster() {
+        val selId = selectedJobId
+
+        if (selId != null) {
+            ensureSelectedForceApplied(selId)
+            // IMPORTANTE: restoreRasterOnMap deve importar no *mesmo* rasterEngine já criado
+            restoreRasterOnMap(selId)
+            Log.d("RASTER", "mapReady=$mapReady payloadRestaurado=SIM")
+            Log.d("RASTER", "origin=${rasterEngine.currentOriginLat()},${rasterEngine.currentOriginLon()} res=${rasterEngine.currentResolutionM()} tile=${rasterEngine.currentTileSize()}")
+
+
+            // Força redesenho:
+            rasterEngine.invalidateTiles()
+            // Se seu RasterCoverageOverlay tiver invalidateTiles(), pode chamar também:
+            // rasterOverlay.invalidateTiles()
+            map.invalidate()
+        } else {
+            // Modo livre
+            val snap = app.freeModeRaster
+            if (snap != null) {
+                // Seu engine define importSnapshot(Snapshot) — perfeito
+                rasterEngine.importSnapshot(snap)
+            } else {
+                // nada pra restaurar; apenas garanta o redraw
+            }
+            rasterEngine.invalidateTiles()
+            // rasterOverlay.invalidateTiles() // se existir
+            map.invalidate()
+        }
+    }
+
+    private fun refreshImplementosButtonColor() {
+        // azul quando há um implemento efetivo (manual ou forçado)
+        val snap = ImplementoSelector.currentSnapshot(this)
+        btnImplementos.isSelected = (snap != null)
+    }
+
+    private fun refreshPlayButtonColor() {
+        // azul quando está rodando
+        btnLigar.isSelected = isWorking
+    }
+
+    private fun flushRasterSync(reason: String) {
+        val selId = selectedJobId ?: return
+        try {
+            // Tempo curto p/ não travar a UI: ajuste se necessário (400–1000 ms)
+            runBlocking {
+                withTimeout(800) {
+                    withContext(Dispatchers.IO) {
+                        jobManager.saveRaster(selId, rasterEngine)
+                    }
+                }
+            }
+            Log.d("RASTER", "flushRasterSync ok ($reason)")
+        } catch (t: Throwable) {
+            Log.w("RASTER", "flushRasterSync falhou ($reason): ${t.message}")
+        }
+    }
+    override fun onSaveInstanceState(outState: Bundle) {
+        // Flush rápido — chamado em rota “fechar / background”
+        flushRasterSync("onSaveInstanceState")
+        super.onSaveInstanceState(outState)
+    }
+    // Salva imediatamente o estado play/pause (e job atual para telemetria visual)
+    private fun persistPlayState() {
+        statePrefs.edit()
+            .putBoolean("isWorking", isWorking)
+            .apply()
+    }
+
+    // Lê o estado salvo. Somente 1ª abertura vem como false (default).
+    private fun restorePlayState() {
+        isWorking = statePrefs.getBoolean("isWorking", false)
+    }
+
+    // Mantém botão e label coerentes com o estado atual
+    private fun syncPlayUi() {
+        btnLigar.isSelected = isWorking
+        btnLigar.setImageResource(
+            if (isWorking) android.R.drawable.ic_media_pause
+            else android.R.drawable.ic_media_play
+        )
+        // Atualiza a faixa “Estado: Ativo/Pausado — Nome”
+        refreshJobState()
+    }
+
+}

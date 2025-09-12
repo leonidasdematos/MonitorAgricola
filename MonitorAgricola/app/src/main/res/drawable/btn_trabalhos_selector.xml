@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Quando houver trabalho selecionado -->
+    <item android:state_selected="true">
+        <shape android:shape="oval">
+            <solid android:color="#2196F3"/> <!-- azul -->
+            <size android:width="60dp" android:height="60dp"/>
+        </shape>
+    </item>
+
+    <!-- Quando NÃO houver trabalho -->
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#80000000"/> <!-- cinza translúcido (igual seu round_button) -->
+            <size android:width="60dp" android:height="60dp"/>
+        </shape>
+    </item>
+</selector>

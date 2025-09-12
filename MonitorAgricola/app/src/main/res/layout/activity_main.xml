@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:id="@+id/sidebar"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#A0000000"
+        android:orientation="vertical"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintWidth_percent="0.2"
+        app:layout_constraintWidth_max="100dp">
+
+        <!-- Botão Redondo de Ligar na Barra Lateral -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:layout_marginTop="20dp">
+
+            <ImageButton
+                android:id="@+id/btnLigar"
+                android:layout_width="60dp"
+                android:layout_height="60dp"
+                android:background="@drawable/btn_trabalhos_selector"
+                android:src="@android:drawable/ic_media_play"
+                app:tint="@android:color/white"
+                android:contentDescription="Botão Ligar" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Iniciar"
+                android:textColor="#FFFFFF"
+                android:layout_marginTop="8dp" />
+
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:layout_marginTop="20dp">
+
+            <ImageButton
+                android:id="@+id/btnImplementos"
+                android:layout_width="60dp"
+                android:layout_height="60dp"
+                android:background="@drawable/btn_trabalhos_selector"
+                android:src="@android:drawable/ic_menu_manage"
+                app:tint="@android:color/white"
+                android:contentDescription="Implementos" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Implementos"
+                android:textColor="#FFFFFF"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:layout_marginTop="20dp">
+
+            <ImageButton
+                android:id="@+id/btnTrabalhos"
+                android:layout_width="60dp"
+                android:layout_height="60dp"
+                android:background="@drawable/btn_trabalhos_selector"
+                android:src="@drawable/outline_automation_24"
+                app:tint="@android:color/white"
+                android:contentDescription="Trabalhos" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Trabalhos"
+                android:textColor="#FFFFFF"
+                android:layout_marginTop="8dp" />
+
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:layout_marginTop="20dp">
+
+            <ImageButton
+                android:id="@+id/btnRotas"
+                android:layout_width="60dp"
+                android:layout_height="60dp"
+                android:background="@drawable/round_button"
+                android:src="@android:drawable/ic_menu_directions"
+                app:tint="@android:color/white"
+                android:contentDescription="Rotas" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Rotas"
+                android:textColor="#FFFFFF"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+
+
+    </LinearLayout>
+
+    <FrameLayout
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/sidebar"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <org.osmdroid.views.MapView
+            android:id="@+id/map"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- Botão Redondo de Configuração no Canto Superior Direito -->
+        <ImageButton
+            android:id="@+id/btnConfigTop"
+            android:layout_width="50dp"
+            android:layout_height="50dp"
+            android:layout_margin="16dp"
+            android:layout_gravity="top|end"
+            android:background="@drawable/round_button"
+            android:src="@android:drawable/ic_menu_manage"
+            app:tint="@android:color/white"
+            android:contentDescription="Configurações" />
+
+        <LinearLayout
+            android:id="@+id/bottom_bar"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:layout_gravity="bottom"
+            android:background="#AA000000"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="10dp">
+
+            <TextView
+                android:id="@+id/tvVelocidade"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:text="Velocidade: 0 km/h"
+                android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/tvLinhaAlvo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:text="Linha: —"
+                android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/tvErroLateral"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:text="Erro: 0.00 m"
+                android:textColor="#FFFFFF" />
+
+
+            <TextView
+                android:id="@+id/tvImplemento"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:text="Implemento: -"
+                android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/tvJobState"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:text="Estado: —"
+                android:textColor="#FFFFFF"
+                android:visibility="gone" />
+
+
+
+            <TextView
+                android:id="@+id/tvArea"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:text="Área: 0 m²"
+                android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/tvSobreposicao"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:text="Sobreposição: 0 m²"
+                android:textColor="#FFFFFF" />
+
+        </LinearLayout>
+
+    </FrameLayout>
+</androidx.constraintlayout.widget.ConstraintLayout>

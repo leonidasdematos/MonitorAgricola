@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tipo de Rota"
+            android:textStyle="bold"
+            android:textSize="16sp"/>
+
+        <RadioGroup
+            android:id="@+id/rgTipo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="8dp">
+
+            <RadioButton
+                android:id="@+id/rbABReta"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="AB (Reta)"/>
+
+            <RadioButton
+                android:id="@+id/rbCurva"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Curva (trilho de referência)"/>
+        </RadioGroup>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Parâmetros"
+            android:textStyle="bold"
+            android:textSize="16sp"/>
+
+        <!-- Implemento atual (opcional) -->
+        <TextView
+            android:id="@+id/tvImplementoInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Implemento: —"
+            android:layout_marginTop="8dp" />
+
+        <CheckBox
+            android:id="@+id/cbUsarCustom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Usar espaçamento diferente do implemento"
+            android:layout_marginTop="8dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Espaçamento (m)"/>
+
+            <EditText
+                android:id="@+id/etEspacamento"
+                android:layout_width="120dp"
+                android:layout_height="wrap_content"
+                android:inputType="numberDecimal"
+                android:hint="0.45"
+                android:enabled="false"/> <!-- desabilitado por padrão -->
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnSalvar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Salvar"
+            android:layout_marginTop="20dp"/>
+    </LinearLayout>
+</ScrollView>
