@@ -2,6 +2,7 @@ package com.example.monitoragricola.jobs
 
 import com.example.monitoragricola.jobs.db.*
 import com.example.monitoragricola.raster.RasterCoverageEngine
+import com.example.monitoragricola.raster.store.RasterDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -10,7 +11,7 @@ class JobsRepository(
     private val jobDao: JobDao,
     private val pointDao: JobPointDao,
     private val eventDao: JobEventDao,
-    private val rasterDb: com.example.monitoragricola.raster.store.RasterRoomDb
+    private val rasterDb: RasterDatabase
 ) {
 
     fun observeAll(): Flow<List<JobEntity>> = jobDao.observeAll()

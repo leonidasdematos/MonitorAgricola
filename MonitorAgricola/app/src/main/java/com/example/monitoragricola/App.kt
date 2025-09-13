@@ -8,7 +8,6 @@ import com.example.monitoragricola.jobs.JobManager
 import com.example.monitoragricola.jobs.JobsRepository
 import com.example.monitoragricola.map.ImplementoBase
 import java.io.File
-import com.example.monitoragricola.raster.store.RasterRoomDb
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -52,10 +51,10 @@ class App : Application() {
     }
 
     // Banco Room para tiles raster por job
-    val rasterDb: RasterRoomDb by lazy {
+    val rasterDb: RasterDatabase by lazy {
         Room.databaseBuilder(
             applicationContext,
-            RasterRoomDb::class.java,
+            RasterDatabase::class.java,
             "raster_tiles.db"
         )
             .fallbackToDestructiveMigration()
