@@ -48,8 +48,6 @@ import com.example.monitoragricola.raster.HotVizMode
 import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.store.SqliteTileStore
 import com.example.monitoragricola.raster.store.TileStoreRoom
-import com.example.monitoragricola.raster.SqliteTileStore
-import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.RasterSnapshot
@@ -91,10 +89,8 @@ class MainActivity : AppCompatActivity() {
     private val freeTileStore by lazy { SqliteTileStore(this, app.freeModeTilePath) }
     private val noopTileStore = object : TileStore {
         override fun loadTile(tx: Int, ty: Int) = null
-        override fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
-        override fun snapshot(meta: RasterSnapshot) {}
-        override fun restore(): RasterSnapshot? = null
-        override fun clear() {}
+        override suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
+
     }
 
 

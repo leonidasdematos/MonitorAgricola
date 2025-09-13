@@ -2,6 +2,7 @@
 package com.example.monitoragricola.raster.store
 
 import java.io.*
+import com.example.monitoragricola.raster.StoreTile
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import kotlin.experimental.and

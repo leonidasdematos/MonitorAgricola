@@ -20,8 +20,6 @@ data class StoreTile(
 interface TileStore {
     /** Deve ser rápido (cache interno), mas o acesso pesado roda em Dispatchers.IO no chamador. */
     fun loadTile(tx: Int, ty: Int): StoreTile?
-    fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>)
-    fun snapshot(meta: RasterSnapshot)
-    fun restore(): RasterSnapshot?
-    fun clear()
+    suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>)
+
 }

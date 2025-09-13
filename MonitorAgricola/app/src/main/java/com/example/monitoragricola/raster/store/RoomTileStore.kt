@@ -36,7 +36,7 @@ class TileStoreRoom(
             val ts = tile.size
 
             // Monte o StoreTile com os buffers atuais do TileData
-            val st = com.example.monitoragricola.raster.store.StoreTile(
+            val st = StoreTile(
                 tx = key.tx,
                 ty = key.ty,
                 rev = tile.rev,
