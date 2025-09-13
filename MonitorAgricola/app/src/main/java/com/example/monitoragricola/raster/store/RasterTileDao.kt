@@ -18,6 +18,10 @@ interface RasterTileDao {
     @Query("SELECT * FROM raster_tiles WHERE jobId = :jobId AND tx = :tx AND ty = :ty LIMIT 1")
     suspend fun getTile(jobId: Long, tx: Int, ty: Int): RasterTileEntity?
 
+    @Query("SELECT COUNT(*) FROM raster_tiles WHERE jobId = :jobId")
+    suspend fun countByJob(jobId: Long): Int
+
+
     @Query("DELETE FROM raster_tiles WHERE jobId = :jobId")
     suspend fun deleteByJob(jobId: Long)
 }

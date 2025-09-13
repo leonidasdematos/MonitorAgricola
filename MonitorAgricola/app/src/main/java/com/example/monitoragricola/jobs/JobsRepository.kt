@@ -10,9 +10,8 @@ class JobsRepository(
     private val jobDao: JobDao,
     private val pointDao: JobPointDao,
     private val eventDao: JobEventDao,
-    private val rasterSnapDao: com.example.monitoragricola.raster.store.JobRasterSnapshotDao
+    private val rasterDb: com.example.monitoragricola.raster.store.RasterRoomDb
 ) {
-    private val rasterStore by lazy { com.example.monitoragricola.raster.store.RasterSnapshotStore(rasterSnapDao) }
 
     fun observeAll(): Flow<List<JobEntity>> = jobDao.observeAll()
 
@@ -28,7 +27,7 @@ class JobsRepository(
         // apaga filhos antes
         pointDao.deleteByJob(jobId)
         eventDao.deleteByJob(jobId)
-        rasterSnapDao.deleteByJob(jobId)
+        rasterDb.rasterTileDao().deleteByJob(jobId)
         // se tiver rotas/tabelas relacionadas, inclua aqui:
         // routeDao.deleteByJob(jobId)
         // routeLineDao.deleteByJob(jobId)
@@ -47,10 +46,22 @@ class JobsRepository(
     suspend fun maxSeq(jobId: Long): Int = pointDao.maxSeq(jobId) ?: 0
 
     suspend fun loadRasterInto(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine): Boolean =
-        withContext(kotlinx.coroutines.Dispatchers.IO) { rasterStore.loadInto(jobId, engine) }
-
+        withContext(Dispatchers.IO) {
+            val store = com.example.monitoragricola.raster.store.TileStoreRoom(rasterDb, jobId)
+            engine.attachStore(store)
+            rasterDb.rasterTileDao().countByJob(jobId) > 0
+        }
     suspend fun saveRaster(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
-        withContext(kotlinx.coroutines.Dispatchers.IO) { rasterStore.save(jobId, engine) }
+        withContext(Dispatchers.IO) {
+            val store = com.example.monitoragricola.raster.store.TileStoreRoom(rasterDb, jobId)
+            val dirty = engine.tilesSnapshot().mapNotNull { entry ->
+                val keyPacked = entry.key
+                val tile = entry.value
+                if (tile.dirty) com.example.monitoragricola.raster.TileKey.unpack(keyPacked) to tile else null
+            }
+            store.saveDirtyTilesAndClear(dirty)
+            for ((_, tile) in dirty) tile.dirty = false
+        }
     suspend fun deleteRaster(jobId: Long) =
-        withContext(kotlinx.coroutines.Dispatchers.IO) { rasterStore.delete(jobId) }
+        withContext(Dispatchers.IO) { rasterDb.rasterTileDao().deleteByJob(jobId) }
 }

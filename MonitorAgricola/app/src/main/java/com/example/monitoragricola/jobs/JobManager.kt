@@ -171,13 +171,16 @@ class JobManager(
     suspend fun get(jobId: Long): JobEntity? = withContext(Dispatchers.IO) { repo.get(jobId) }
 
     // ========================= RASTER (NOVO) =========================
-
-    /** Carrega o raster salvo para o engine. Use na tela ao retomar um job. */
+    /**
+     * Anexa o TileStore ao engine e retorna true se já existiam tiles persistidos.
+     * Use na tela ao retomar um job.
+     */
     suspend fun loadRasterInto(jobId: Long, engine: RasterCoverageEngine): Boolean =
         repo.loadRasterInto(jobId, engine)
 
-    /** Salva o raster atual do engine. Chame em checkpoints (pause, background, etc.). */
-    /** Salva tiles sujos e snapshot de metadados. */
+    /**
+     * Persiste os tiles sujos do engine. Chame em checkpoints (pause, background, etc.).
+     */    /** Salva tiles sujos e snapshot de metadados. */
     suspend fun saveRaster(jobId: Long, store: TileStore, engine: RasterCoverageEngine) =
         withContext(Dispatchers.IO) {
             val dirty = engine.tilesSnapshot().mapNotNull { (k, t) ->
@@ -192,4 +195,6 @@ class JobManager(
 
     /** Remove o raster persistido do job (ao apagar o job, por exemplo). */
     suspend fun deleteRaster(jobId: Long) = repo.deleteRaster(jobId)
+    fun exportSnapshot(engine: RasterCoverageEngine) = engine.exportSnapshot()
+
 }
