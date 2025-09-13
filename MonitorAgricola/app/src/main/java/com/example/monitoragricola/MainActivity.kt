@@ -93,7 +93,7 @@ class MainActivity : AppCompatActivity() {
 
     private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID) }
     private val noopTileStore = object : TileStore {
-        override fun loadTile(tx: Int, ty: Int) = null
+        override  fun loadTile(tx: Int, ty: Int) = null
         override suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
 
     }
@@ -245,10 +245,17 @@ class MainActivity : AppCompatActivity() {
                         job?.let { safeJob ->
                             val store = RoomTileStore(app.rasterDb, safeJob.id)
                             rasterEngine.attachStore(store)
-                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, store, rasterEngine) }
+                            withContext(Dispatchers.IO) {
+                                jobManager.saveRaster(
+                                    safeJob.id,
+                                    store,
+                                    rasterEngine
+                                )
+                            }
                             rasterEngine.attachStore(freeModeStore)
                         }
-                    withContext(Dispatchers.IO) { freeTileStore.clear() }
+
+                    freeTileStore.clear()
                     app.clearFreeModeTileStore()
                     rasterEngine.attachStore(noopTileStore)
                 }
@@ -746,7 +753,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startViewportUpdates() {
         viewportJob?.cancel()
-        viewportJob = lifecycleScope.launch {
+        viewportJob = lifecycleScope.launch(Dispatchers.Default) {
             while (isActive) {
                 rasterEngine.updateViewport(map.boundingBox)
                 delay(1000L)
@@ -790,7 +797,11 @@ class MainActivity : AppCompatActivity() {
 
                     val now = System.currentTimeMillis()
                     if (now - lastHotUpdate > 100) {
-                        rasterEngine.updateTractorHotCenter(currentPos.latitude, currentPos.longitude)
+                        val lat = currentPos.latitude
+                        val lon = currentPos.longitude
+                        lifecycleScope.launch(Dispatchers.Default) {
+                            rasterEngine.updateTractorHotCenter(lat, lon)
+                        }
                         lastHotUpdate = now
                     }
 
@@ -828,7 +839,10 @@ class MainActivity : AppCompatActivity() {
                         scheduleViewportUpdate()
                     }
                     if (now - lastViewportUpdate > 500) {
-                        rasterEngine.updateViewport(map.boundingBox)
+                        val bb = map.boundingBox
+                        lifecycleScope.launch(Dispatchers.Default) {
+                            rasterEngine.updateViewport(bb)
+                        }
                         lastViewportUpdate = now
                     }
                     // Sempre atualiza o estado do implemento (barra, centro, articulação).
@@ -1080,7 +1094,9 @@ class MainActivity : AppCompatActivity() {
     private fun clearRasterFromMap() {
         rasterEngine.clearCoverage()
         rasterOverlay.invalidateTiles()
-        freeTileStore.clear()
+        lifecycleScope.launch {
+            freeTileStore.clear()
+        }
         app.clearFreeModeTileStore()
         map.invalidate()
     }
