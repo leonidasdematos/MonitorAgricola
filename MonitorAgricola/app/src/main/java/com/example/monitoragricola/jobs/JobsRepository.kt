@@ -48,13 +48,13 @@ class JobsRepository(
 
     suspend fun loadRasterInto(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine): Boolean =
         withContext(Dispatchers.IO) {
-            val store = com.example.monitoragricola.raster.store.TileStoreRoom(rasterDb, jobId)
+            val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
             engine.attachStore(store)
             rasterDb.rasterTileDao().countByJob(jobId) > 0
         }
     suspend fun saveRaster(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
         withContext(Dispatchers.IO) {
-            val store = com.example.monitoragricola.raster.store.TileStoreRoom(rasterDb, jobId)
+            val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
             val dirty = engine.tilesSnapshot().mapNotNull { entry ->
                 val keyPacked = entry.key
                 val tile = entry.value

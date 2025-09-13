@@ -7,7 +7,7 @@ import com.example.monitoragricola.raster.StoreTile
 import com.example.monitoragricola.raster.RasterSnapshot
 import kotlinx.coroutines.runBlocking
 
-class TileStoreRoom(
+class RoomTileStore(
     private val db: RasterDatabase,
     private val jobId: Long
 ) : TileStore {

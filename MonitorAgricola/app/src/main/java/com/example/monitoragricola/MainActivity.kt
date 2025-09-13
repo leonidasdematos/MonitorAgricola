@@ -47,7 +47,7 @@ import com.example.monitoragricola.raster.RasterCoverageOverlay
 import com.example.monitoragricola.raster.HotVizMode
 import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.store.SqliteTileStore
-import com.example.monitoragricola.raster.store.TileStoreRoom
+import com.example.monitoragricola.raster.store.RoomTileStore
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.RasterSnapshot
@@ -579,7 +579,7 @@ class MainActivity : AppCompatActivity() {
                                     refreshJobsButtonColor()
                                     refreshImplementosButtonColor()
                                     refreshPlayButtonColor()
-                                    val store = TileStoreRoom(app.rasterDb, job.id)
+                                    val store = RoomTileStore(app.rasterDb, job.id)
                                     rasterEngine.attachStore(store)
                                     currentTileStore = store
                                     withContext(Dispatchers.IO) { jobManager.resume(job.id) }
@@ -672,7 +672,7 @@ class MainActivity : AppCompatActivity() {
                             ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
                         }
 
-                        val store = TileStoreRoom(app.rasterDb, job.id)
+                        val store = RoomTileStore(app.rasterDb, job.id)
                         rasterEngine.attachStore(store)
                         currentTileStore = store
                         activeImplemento?.start()
@@ -1011,7 +1011,7 @@ class MainActivity : AppCompatActivity() {
                     tileSize = 256
                 )
             }
-            val store = TileStoreRoom(app.rasterDb, jobId)
+            val store = RoomTileStore(app.rasterDb, job.id)
             rasterEngine.attachStore(store)
             currentTileStore = store
 
