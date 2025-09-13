@@ -46,8 +46,8 @@ import com.example.monitoragricola.raster.RasterCoverageEngine
 import com.example.monitoragricola.raster.RasterCoverageOverlay
 import com.example.monitoragricola.raster.HotVizMode
 import com.example.monitoragricola.raster.TileStore
-import com.example.monitoragricola.raster.store.SqliteTileStore
 import com.example.monitoragricola.raster.store.RoomTileStore
+import com.example.monitoragricola.FREE_MODE_JOB_ID
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.RasterSnapshot
@@ -86,7 +86,7 @@ class MainActivity : AppCompatActivity() {
 
     private var mapReady = false
 
-    private val freeTileStore by lazy { SqliteTileStore(this, app.freeModeTilePath) }
+    private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID) }
     private val noopTileStore = object : TileStore {
         override fun loadTile(tx: Int, ty: Int) = null
         override suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
@@ -94,7 +94,7 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private val freeModeStore by lazy { SqliteTileStore(this, "free_mode_tiles.db") }
+    private val freeModeStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID) }
     private var currentTileStore: TileStore? = null
 
 
@@ -1011,7 +1011,7 @@ class MainActivity : AppCompatActivity() {
                     tileSize = 256
                 )
             }
-            val store = RoomTileStore(app.rasterDb, job.id)
+            val store = RoomTileStore(app.rasterDb, jobId)
             rasterEngine.attachStore(store)
             currentTileStore = store
 

@@ -7,12 +7,13 @@ import com.example.monitoragricola.jobs.JobRecorder
 import com.example.monitoragricola.jobs.JobManager
 import com.example.monitoragricola.jobs.JobsRepository
 import com.example.monitoragricola.map.ImplementoBase
-import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import com.example.monitoragricola.raster.store.RasterDatabase
 
+const val FREE_MODE_JOB_ID = 0L
 
 class App : Application() {
 
@@ -29,13 +30,13 @@ class App : Application() {
 
     val implementoStateStore = ImplementoStateStore()
 
-    override fun onCreate() {
-        super.onCreate()
-        freeModeTilePath = File(cacheDir, "free_mode_tiles.db").absolutePath
-    }
+    lateinit var freeModeTilePath: String
+
 
     fun clearFreeModeTileStore() {
-        File(freeModeTilePath).delete()
+        applicationScope.launch {
+            rasterDb.rasterTileDao().deleteByJob(FREE_MODE_JOB_ID)
+        }
     }
 
     // DB

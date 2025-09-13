@@ -17,6 +17,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.example.monitoragricola.FREE_MODE_JOB_ID
 import com.example.monitoragricola.R
 import com.example.monitoragricola.implementos.ImplementoSelector
 import com.example.monitoragricola.implementos.ImplementosPrefs
@@ -24,6 +25,7 @@ import com.example.monitoragricola.jobs.JobState
 import com.example.monitoragricola.jobs.db.JobEntity
 import com.example.monitoragricola.ui.MainActivity
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
 
 /**
@@ -190,7 +192,9 @@ class TrabalhosActivity : AppCompatActivity() {
                 val nome = input.text?.toString()?.ifBlank { null } ?: return@setPositiveButton
                 // Se há snapshot do modo livre disponível, ofereça as opções:
                 val app = application as com.example.monitoragricola.App
-                val hasFreeSnapshot = java.io.File(app.freeModeTilePath).exists()
+                val hasFreeSnapshot = runBlocking {
+                    app.rasterDb.rasterTileDao().countByJob(FREE_MODE_JOB_ID) > 0
+                }
                 val options = if (hasFreeSnapshot)
                     arrayOf("Criar e iniciar (vazio)", "Criar e iniciar copiando do Modo Livre")
                 else
