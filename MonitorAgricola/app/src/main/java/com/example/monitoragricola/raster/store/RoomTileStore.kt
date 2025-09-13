@@ -18,21 +18,9 @@ class TileStoreRoom(
      */
     override fun loadTile(tx: Int, ty: Int): StoreTile? = runBlocking {
         val e = dao.getTile(jobId, tx, ty) ?: return@runBlocking null
-        val d = TileCodec.decode(e.payload)
-
-        val st = d.storeTile
-        return@runBlocking StoreTile(
-            tx = tx,
-            ty = ty,
-            rev = e.rev,
-            layerMask = e.layerMask,
-            count = st.count,
-            sections = st.sections,
-            rate = st.rate,
-            speed = st.speed,
-            lastStrokeId = st.lastStrokeId,
-            frontStamp = st.frontStamp
-        )
+        // payload → StoreTile
+        val st = TileCodec.decode(e.payload).storeTile
+        return@runBlocking st
     }
 
     /**

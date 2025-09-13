@@ -8,6 +8,8 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.util.Log
 import com.example.monitoragricola.map.ProjectionHelper
+import com.example.monitoragricola.raster.store.StoreTile
+import com.example.monitoragricola.raster.store.TileStore
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import kotlin.math.*
