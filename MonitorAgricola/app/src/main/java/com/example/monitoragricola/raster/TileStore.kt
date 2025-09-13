@@ -22,4 +22,13 @@ interface TileStore {
     fun loadTile(tx: Int, ty: Int): StoreTile?
     suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>)
 
+    /** Opcional: persistir snapshot completo do raster */
+    fun snapshot(meta: RasterSnapshot) {}
+
+    /** Opcional: restaurar snapshot persistido */
+    fun restore(): RasterSnapshot? = null
+
+    /** Opcional: limpar todos os tiles persistidos */
+    fun clear() {}
+
 }

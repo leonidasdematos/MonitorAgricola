@@ -87,7 +87,7 @@ class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : Ti
         }
     }
 
-    fun snapshot(meta: RasterSnapshot) {
+    override fun snapshot(meta: RasterSnapshot) {
         val db = helper.writableDatabase
         db.beginTransaction()
         try {
@@ -119,7 +119,7 @@ class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : Ti
         } finally { db.endTransaction() }
     }
 
-    fun restore(): RasterSnapshot? {
+    override fun restore(): RasterSnapshot? {
         val db = helper.readableDatabase
         var meta: RasterSnapshot? = null
         db.rawQuery("SELECT originLat,originLon,resolutionM,tileSize FROM snapshot_meta WHERE id=1", emptyArray()).use { c ->
@@ -149,7 +149,7 @@ class SqliteTileStore(context: Context, dbName: String = "raster_tiles.db") : Ti
         return meta
     }
 
-    fun clear() {
+    override fun clear() {
         helper.writableDatabase.execSQL("DELETE FROM tiles"); helper.writableDatabase.execSQL("DELETE FROM snapshot_meta")
     }
 

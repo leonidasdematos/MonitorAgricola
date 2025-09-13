@@ -4,6 +4,7 @@ import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.StoreTile
+import com.example.monitoragricola.raster.RasterSnapshot
 import kotlinx.coroutines.runBlocking
 
 class TileStoreRoom(
@@ -64,5 +65,16 @@ class TileStoreRoom(
         }
 
         dao.upsertTiles(entities)
+    }
+
+    override fun snapshot(meta: RasterSnapshot) {
+        // Room-based implementation does not persist snapshots yet
+    }
+
+    override fun restore(): RasterSnapshot? = null
+
+    override fun clear() = runBlocking {
+        // Remove all tiles associated with this job
+        dao.deleteByJob(jobId)
     }
 }
