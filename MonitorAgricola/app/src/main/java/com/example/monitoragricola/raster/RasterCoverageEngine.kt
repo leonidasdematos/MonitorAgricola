@@ -169,8 +169,13 @@ class RasterCoverageEngine {
 
     fun stopJob() { running = false; Log.i(TAG_EVT, "stopJob") }
 
-    fun attachStore(store: TileStore?) { this.store = store; Log.i(TAG_EVT, "attachStore=${store!=null}") }
-
+    fun attachStore(store: TileStore?) {
+        this.store = store
+        // Reinicia o loop de flush para refletir o novo store (ou ausência dele)
+        flushJob?.cancel()
+        flushJob = null
+        startFlushLoopIfNeeded()
+    }
     fun currentOriginLat() = originLat
     fun currentOriginLon() = originLon
     fun currentResolutionM() = resolutionM
@@ -541,9 +546,34 @@ class RasterCoverageEngine {
         val inViz = vizSet.contains(keyPacked)
 
         if (!inHot && tile.dirty) {
-            enqueueFlushOnce(keyPacked, tile)
-            if (from == "VIZ") {
-                Log.d(TAG_Q, "VIZ->ENQUEUE key=$keyPacked dirty prevHOT=true qNow=${flushQueue.size} pending=${pendingFlush.size}")
+            val s = store
+            if (s != null) {
+                val qBefore = flushQueue.size
+                enqueueFlushOnce(keyPacked, tile)
+                val qAfter = flushQueue.size
+                Log.d(
+                    "RASTER/Q",
+                    "SCHEDULE from=$from key=$keyPacked dirty=${tile.dirty} rev=${tile.rev} " +
+                            "inHot=$inHot inViz=$inViz q:$qBefore->$qAfter pending=${pendingFlush.size}"
+                )
+                // Sanidade: tile vindo de VIZ e sujo implica que ELE já FOI HOT no passado
+                if (from == "VIZ") {
+                    // Isso confirma o cenário que te expliquei
+                    Log.d(
+                        "RASTER/Q",
+                        "VIZ->ENQUEUE key=$keyPacked: sujo por histórico (saiu do HOT antes), " +
+                                "não foi sujado enquanto estava apenas em VIZ."
+                    )
+                }
+            } else {
+                // Sem store: descarta alterações para evitar vazamento de memória
+                tile.dirty = false
+                pendingFlush.remove(keyPacked)
+                pendingSinceNs.remove(keyPacked)
+                Log.w(
+                    "RASTER/Q",
+                    "DROP from=$from key=$keyPacked sem store; tile descartado"
+                )
             }
         }
 
@@ -568,7 +598,13 @@ class RasterCoverageEngine {
         if (flushJob?.isActive == true) return
         val s = store
         if (s == null) {
-            Log.w(TAG_FLUSH, "store is NULL – não vou iniciar workers; nada será drenado.")
+            Log.w(
+                "RASTER/FLUSH",
+                "store is NULL – limpando fila de flush para evitar uso excessivo de memória"
+            )
+            flushQueue.clear()
+            pendingFlush.clear()
+            pendingSinceNs.clear()
             return
         }
 
