@@ -7,6 +7,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.google.gson.Gson
 import com.example.monitoragricola.raster.RasterCoverageEngine
+import com.example.monitoragricola.raster.TileKey
+import com.example.monitoragricola.raster.TileStore
+
 // import com.example.monitoragricola.jobs.coverage.RasterCoverageProvider // (se/quando usar métricas agregadas)
 
 class JobManager(
@@ -174,8 +177,18 @@ class JobManager(
         repo.loadRasterInto(jobId, engine)
 
     /** Salva o raster atual do engine. Chame em checkpoints (pause, background, etc.). */
-    suspend fun saveRaster(jobId: Long, engine: RasterCoverageEngine) =
-        repo.saveRaster(jobId, engine)
+    /** Salva tiles sujos e snapshot de metadados. */
+    suspend fun saveRaster(jobId: Long, store: TileStore, engine: RasterCoverageEngine) =
+        withContext(Dispatchers.IO) {
+            val dirty = engine.tilesSnapshot().mapNotNull { (k, t) ->
+                if (t.dirty) TileKey.unpack(k) to t else null
+            }
+            if (dirty.isNotEmpty()) {
+                store.saveDirtyTilesAndClear(dirty)
+                dirty.forEach { it.second.dirty = false }
+            }
+            repo.saveRaster(jobId, engine)
+        }
 
     /** Remove o raster persistido do job (ao apagar o job, por exemplo). */
     suspend fun deleteRaster(jobId: Long) = repo.deleteRaster(jobId)

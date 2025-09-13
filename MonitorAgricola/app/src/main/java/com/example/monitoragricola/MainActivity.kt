@@ -45,6 +45,9 @@ import android.view.WindowManager
 import com.example.monitoragricola.raster.RasterCoverageEngine
 import com.example.monitoragricola.raster.RasterCoverageOverlay
 import com.example.monitoragricola.raster.HotVizMode
+import com.example.monitoragricola.raster.TileStore
+import com.example.monitoragricola.raster.store.SqliteTileStore
+import com.example.monitoragricola.raster.store.TileStoreRoom
 
 private const val TAG_RASTER = "RASTER"
 
@@ -79,6 +82,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rasterOverlay: RasterCoverageOverlay
 
     private var mapReady = false
+
+    private val freeModeStore by lazy { SqliteTileStore(this, "free_mode_tiles.db") }
+    private var currentTileStore: TileStore? = null
+
 
     /* ======================= UI ======================= */
     private lateinit var tvVelocidade: TextView
@@ -218,8 +225,10 @@ class MainActivity : AppCompatActivity() {
                         rasterEngine.importSnapshot(snap)
                         // 2) Salva no job (vira o “estado inicial” do job)
                         job?.let { safeJob ->
-                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, rasterEngine) }
-                        }                        // 3) Opcional: NÃO apague o freeModeRaster aqui — a ideia é não perder o modo livre
+                            val store = TileStoreRoom(app.rasterDb, safeJob.id)
+                            rasterEngine.attachStore(store)
+                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, store, rasterEngine) }
+                            rasterEngine.attachStore(freeModeStore)                        }                        // 3) Opcional: NÃO apague o freeModeRaster aqui — a ideia é não perder o modo livre
                         //    (ele só é limpo quando o usuário quiser explicitamente).
                     }
                 }
@@ -425,8 +434,11 @@ class MainActivity : AppCompatActivity() {
         // 1) snapshot rápido raster antes de sair
         val selId = selectedJobId
         if (selId != null) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                runCatching { jobManager.saveRaster(selId, rasterEngine) }
+            val store = currentTileStore
+            if (store != null) {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    runCatching { jobManager.saveRaster(selId, store, rasterEngine) }
+                }
             }
         } else {
             // modo livre: ainda usamos snapshot em memória
@@ -482,6 +494,8 @@ class MainActivity : AppCompatActivity() {
                 "Engine startJob: origin=(${currentOriginLat()}, ${currentOriginLon()}) res=${currentResolutionM()} tile=${currentTileSize()}"
             )
         }
+        rasterEngine.attachStore(freeModeStore)
+        currentTileStore = freeModeStore
         rasterOverlay = RasterCoverageOverlay(map, rasterEngine)
 
         // Adicione o raster antes do trator, para o trator ficar por cima
@@ -558,6 +572,9 @@ class MainActivity : AppCompatActivity() {
                                     refreshJobsButtonColor()
                                     refreshImplementosButtonColor()
                                     refreshPlayButtonColor()
+                                    val store = TileStoreRoom(app.rasterDb, job.id)
+                                    rasterEngine.attachStore(store)
+                                    currentTileStore = store
                                     withContext(Dispatchers.IO) { jobManager.resume(job.id) }
                                     isWorking = true
                                     persistPlayState()
@@ -570,8 +587,10 @@ class MainActivity : AppCompatActivity() {
                             }
                             "Pausar trabalho" -> active?.let { job ->
                                 lifecycleScope.launch {
-                                    jobManager.saveRaster(job.id, rasterEngine)
+                                    currentTileStore?.let { ts -> jobManager.saveRaster(job.id, ts, rasterEngine) }
                                     jobManager.pause(job.id)
+                                    rasterEngine.attachStore(freeModeStore)
+                                    currentTileStore = freeModeStore
                                     isWorking = false
                                     persistPlayState()
                                     syncPlayUi()
@@ -587,8 +606,10 @@ class MainActivity : AppCompatActivity() {
                             "Finalizar trabalho" -> active?.let { job ->
                                 lifecycleScope.launch {
                                     val areas = rasterEngine.getAreas()
-                                    jobManager.saveRaster(job.id, rasterEngine)
+                                    currentTileStore?.let { ts -> jobManager.saveRaster(job.id, ts, rasterEngine) }
                                     jobManager.finish(job.id, areas.totalM2, areas.overlapM2)
+                                    rasterEngine.attachStore(freeModeStore)
+                                    currentTileStore = freeModeStore
                                     ImplementoSelector.clearForce(this@MainActivity)
                                     ImplementosPrefs.clearSelectedJobId(this@MainActivity)
                                     selectedJobId = null
@@ -644,6 +665,9 @@ class MainActivity : AppCompatActivity() {
                             ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
                         }
 
+                        val store = TileStoreRoom(app.rasterDb, job.id)
+                        rasterEngine.attachStore(store)
+                        currentTileStore = store
                         activeImplemento?.start()
                         btnLigar.setImageResource(android.R.drawable.ic_media_pause)
                         withContext(Dispatchers.IO) { jobManager.resume(selId!!) }
@@ -659,10 +683,11 @@ class MainActivity : AppCompatActivity() {
                     activeImplemento?.stop()
                     btnLigar.setImageResource(android.R.drawable.ic_media_play)
 
-                    selId?.let {
-                        jobManager.saveRaster(it, rasterEngine)
-                        //val areas = rasterEngine.getAreas()
-                        withContext(Dispatchers.IO) { jobManager.pause(it) }
+                    selId?.let { id ->
+                        currentTileStore?.let { ts -> jobManager.saveRaster(id, ts, rasterEngine) }
+                        withContext(Dispatchers.IO) { jobManager.pause(id) }
+                        rasterEngine.attachStore(freeModeStore)
+                        currentTileStore = freeModeStore
                         stopCheckpointLoop()
                         Toast.makeText(this@MainActivity, "Trabalho pausado", Toast.LENGTH_SHORT).show()
                     } ?: run {
@@ -812,8 +837,9 @@ class MainActivity : AppCompatActivity() {
             while (isActive && isWorking) {
                 try {
                     val id = selectedJobId
-                    if (id != null) {
-                        jobManager.saveRaster(id, rasterEngine)
+                    val store = currentTileStore
+                    if (id != null && store != null) {
+                        jobManager.saveRaster(id, store, rasterEngine)
                     } else {
                         // Modo livre: checkpoint rápido em memória
                         val snap = rasterEngine.exportSnapshot()
@@ -978,6 +1004,10 @@ class MainActivity : AppCompatActivity() {
                     tileSize = 256
                 )
             }
+            val store = TileStoreRoom(app.rasterDb, jobId)
+            rasterEngine.attachStore(store)
+            currentTileStore = store
+
 
             rasterOverlay.invalidateTiles()
             map.invalidate()
@@ -1414,13 +1444,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun flushRasterSync(reason: String) {
         val selId = selectedJobId ?: return
+        val store = currentTileStore ?: return
         try {
             // Tempo curto p/ não travar a UI: ajuste se necessário (400–1000 ms)
             runBlocking {
                 withTimeout(800) {
-                    withContext(Dispatchers.IO) {
-                        jobManager.saveRaster(selId, rasterEngine)
-                    }
+                    withContext(Dispatchers.IO) { jobManager.saveRaster(selId, store, rasterEngine) }
                 }
             }
             Log.d("RASTER", "flushRasterSync ok ($reason)")

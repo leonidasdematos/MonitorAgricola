@@ -15,7 +15,7 @@ class RasterSnapshotStore(
     private val gson: Gson = Gson()
 ) {
     suspend fun save(jobId: Long, engine: RasterCoverageEngine) {
-        val snap: RasterSnapshot = engine.exportSnapshot()
+        val snap: RasterSnapshot = engine.exportSnapshot().copy(tiles = emptyList())
         val raw: ByteArray = encodeSnapshot(snap)
         val gz: ByteArray = gzip(raw)
         dao.upsert(

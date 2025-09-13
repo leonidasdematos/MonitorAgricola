@@ -46,13 +46,17 @@ class App : Application() {
             .build()
     }
 
-    val rasterDb: RasterDatabase by lazy {
+    // Banco Room para tiles raster por job
+    val rasterDb: com.example.monitoragricola.raster.store.RasterRoomDb by lazy {
         Room.databaseBuilder(
             applicationContext,
-            RasterDatabase::class.java,
-            "raster.db"
-        ).build()
+            com.example.monitoragricola.raster.store.RasterRoomDb::class.java,
+            "raster_tiles.db"
+        )
+            .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+            .build()
     }
+
 
 
     // Repo

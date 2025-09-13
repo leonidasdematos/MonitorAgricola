@@ -153,7 +153,7 @@ class RasterCoverageEngine {
     }
     fun stopJob() { running = false }
 
-    fun attachStore(store: TileStore) { this.store = store }
+    fun attachStore(store: TileStore?) { this.store = store }
 
     fun currentOriginLat() = originLat
     fun currentOriginLon() = originLon
