@@ -29,10 +29,14 @@ import com.example.monitoragricola.map.*
 import com.example.monitoragricola.ui.routes.RoutesActivity
 import kotlinx.coroutines.*
 import org.osmdroid.config.Configuration
+import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.gestures.RotationGestureOverlay
+import org.osmdroid.events.MapListener
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
 import kotlin.math.*
 import android.Manifest
 import android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -85,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rasterOverlay: RasterCoverageOverlay
 
     private var mapReady = false
+    private var lastViewport: BoundingBox? = null
 
     private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID) }
     private val noopTileStore = object : TileStore {
@@ -143,6 +148,8 @@ class MainActivity : AppCompatActivity() {
     private val SIGNAL_LOSS_THRESHOLD_MS = 6_000L
 
     private var currentMinDistMeters: Double = 0.25
+    private var viewportJob: Job? = null
+
 
     /* ======================= Rotas ======================= */
     private var routeRenderer: com.example.monitoragricola.jobs.routes.RouteRenderer? = null
@@ -234,8 +241,11 @@ class MainActivity : AppCompatActivity() {
                     if (snap != null) {
                         rasterEngine.importSnapshot(snap)
                         job?.let { safeJob ->
-                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, rasterEngine) }
-                    }
+                            val store = RoomTileStore(app.rasterDb, safeJob.id)
+                            rasterEngine.attachStore(store)
+                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, store, rasterEngine) }
+                            rasterEngine.attachStore(freeModeStore)
+                        }
                     withContext(Dispatchers.IO) { freeTileStore.clear() }
                     app.clearFreeModeTileStore()
                     rasterEngine.attachStore(noopTileStore)
@@ -508,6 +518,19 @@ class MainActivity : AppCompatActivity() {
         // Adicione o raster antes do trator, para o trator ficar por cima
         map.overlays.add(rasterOverlay)
 
+        map.addMapListener(object : MapListener {
+            override fun onScroll(event: ScrollEvent?): Boolean {
+                scheduleViewportUpdate()
+                return false
+            }
+
+            override fun onZoom(event: ZoomEvent?): Boolean {
+                scheduleViewportUpdate()
+                return false
+            }
+        })
+
+
         tractor = Marker(map).apply {
             position = startPoint
             title = getString(R.string.trator)
@@ -530,6 +553,7 @@ class MainActivity : AppCompatActivity() {
                 // rasterOverlay.invalidateTiles()
                 map.invalidate()
             }
+            scheduleViewportUpdate()
         }
     }
 
@@ -718,8 +742,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun startViewportUpdates() {
+        viewportJob?.cancel()
+        viewportJob = lifecycleScope.launch {
+            while (isActive) {
+                rasterEngine.updateViewport(map.boundingBox)
+                delay(1000L)
+            }
+        }
+    }
+
+
     /* ======================= Loop do mapa ======================= */
+    private fun scheduleViewportUpdate() {
+        val bb = map.boundingBox
+        if (bb == lastViewport) return
+        lastViewport = bb
+        viewportJob?.cancel()
+        viewportJob = lifecycleScope.launch(Dispatchers.Default) {
+            rasterEngine.updateViewport(bb)
+            withContext(Dispatchers.Main) { map.postInvalidate() }
+        }
+    }
     private fun startMapUpdates() {
+        startViewportUpdates()
         handler.post(object : Runnable {
             override fun run() {
                 positionProvider?.getCurrentPosition()?.let { pos ->
@@ -738,7 +784,6 @@ class MainActivity : AppCompatActivity() {
 
                     val currentPos = interpolatedPosition!!
                     tractor.position = currentPos
-                    rasterEngine.updateTractorHotCenter(currentPos.latitude, currentPos.longitude)
 
 
                     val now = System.currentTimeMillis()
@@ -771,10 +816,11 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    if (followTractor) map.controller.setCenter(currentPos)
-
+                    if (followTractor) {
+                        map.controller.setCenter(currentPos)
+                        scheduleViewportUpdate()
+                    }
                     rasterEngine.updateTractorHotCenter(currentPos.latitude, currentPos.longitude)
-                    rasterEngine.updateViewport(map.boundingBox)
 
                     // Sempre atualiza o estado do implemento (barra, centro, articulação).
                     // O ImplementoBase só pinta raster se estiver rodando (running=true).

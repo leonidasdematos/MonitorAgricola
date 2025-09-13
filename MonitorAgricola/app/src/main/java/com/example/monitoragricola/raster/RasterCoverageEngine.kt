@@ -30,7 +30,7 @@ private const val MEM_LOG_INTERVAL_MS = 1500L
 private const val FLUSH_QUEUE_SOFT_LIMIT = 128                  // limite "saudável" para produzir backpressure
 // ===== Config da fila =====
 private const val FLUSH_BATCH_MAX = 512
-private const val FLUSH_WORKERS = 2
+private const val FLUSH_WORKERS = 1
 private const val WATCHDOG_INTERVAL_MS = 2000L
 private const val PENDING_STUCK_MS = 10_000L     // se >10s na fila, alerta
 
@@ -237,21 +237,6 @@ class RasterCoverageEngine {
             scheduleFlushAndMaybeEvict(key, from = "HOT")
         }
 
-        run {
-            var enq = 0
-            for (key in removedFromHot) {
-                val before = flushQueue.size
-                scheduleFlushAndMaybeEvict(key, from = "HOT")
-                if (flushQueue.size > before) enq++
-            }
-            Log.d("RASTER/Q",
-                "HOT move: removedFromHot=${removedFromHot.size} enqueued=$enq " +
-                        "qNow=${flushQueue.size} pending=${pendingFlush.size}"
-            )
-            Log.d("RASTER/Q",
-                "HOT move: removedFromHot=${removedFromHot.size} qNow=${flushQueue.size} pending=${pendingFlush.size}"
-            )
-        }
 
         logMem()
         startFlushLoopIfNeeded()

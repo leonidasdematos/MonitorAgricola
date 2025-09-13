@@ -5,7 +5,12 @@ import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.StoreTile
 import com.example.monitoragricola.raster.RasterSnapshot
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 class RoomTileStore(
     private val db: RasterDatabase,
@@ -14,14 +19,23 @@ class RoomTileStore(
 
     private val dao = db.rasterTileDao()
 
+    private val cache = ConcurrentHashMap<TileKey, StoreTile>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /**
      * loadTile é síncrona no engine → use runBlocking, sem withTransaction.
      */
-    override fun loadTile(tx: Int, ty: Int): StoreTile? = runBlocking {
-        val e = dao.getTile(jobId, tx, ty) ?: return@runBlocking null
-        // payload → StoreTile
-        val st = TileCodec.decode(e.payload).storeTile
-        return@runBlocking st
+    override fun loadTile(tx: Int, ty: Int): StoreTile? {
+        val key = TileKey(tx, ty)
+        cache[key]?.let { return it }
+
+        return runBlocking(Dispatchers.IO) {
+            val e = dao.getTile(jobId, tx, ty) ?: return@runBlocking null
+            // payload → StoreTile
+            val st = TileCodec.decode(e.payload).storeTile
+            cache[key] = st
+            st
+        }
     }
 
     /**
@@ -34,7 +48,7 @@ class RoomTileStore(
         val now = System.currentTimeMillis()
 
         for ((key, tile) in batch) {
-            val ts = tile.size
+            val ts = tile.tileSize
 
             // Monte o StoreTile com os buffers atuais do TileData
             val st = StoreTile(
@@ -76,5 +90,20 @@ class RoomTileStore(
     override fun clear() = runBlocking {
         // Remove all tiles associated with this job
         dao.deleteByJob(jobId)
+        cache.clear()
+    }
+
+    /**
+     * Prefetch tiles asynchronously so callers avoid blocking the UI thread.
+     */
+    fun prefetchTiles(keys: Iterable<TileKey>) {
+        scope.launch {
+            for (key in keys) {
+                if (cache.containsKey(key)) continue
+                val e = dao.getTile(jobId, key.tx, key.ty) ?: continue
+                val st = TileCodec.decode(e.payload).storeTile
+                cache[key] = st
+            }
+        }
     }
 }
