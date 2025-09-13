@@ -127,6 +127,8 @@ class MainActivity : AppCompatActivity() {
     /* ======================= Loop / posição ======================= */
     private val handler = Handler(Looper.getMainLooper())
     private val updateInterval = 10L
+    private var lastHotUpdate = 0L
+    private var lastViewportUpdate = 0L
 
     private var lastPoint: GeoPoint? = null
     private var interpolatedPosition: GeoPoint? = null
@@ -787,6 +789,11 @@ class MainActivity : AppCompatActivity() {
 
 
                     val now = System.currentTimeMillis()
+                    if (now - lastHotUpdate > 100) {
+                        rasterEngine.updateTractorHotCenter(currentPos.latitude, currentPos.longitude)
+                        lastHotUpdate = now
+                    }
+
                     if (now - lastStatsLog > 2000) {
                         val s = rasterEngine.debugStats()
                         Log.d("RASTER",
@@ -820,8 +827,10 @@ class MainActivity : AppCompatActivity() {
                         map.controller.setCenter(currentPos)
                         scheduleViewportUpdate()
                     }
-                    rasterEngine.updateTractorHotCenter(currentPos.latitude, currentPos.longitude)
-
+                    if (now - lastViewportUpdate > 500) {
+                        rasterEngine.updateViewport(map.boundingBox)
+                        lastViewportUpdate = now
+                    }
                     // Sempre atualiza o estado do implemento (barra, centro, articulação).
                     // O ImplementoBase só pinta raster se estiver rodando (running=true).
                     activeImplemento?.updatePosition(lastPoint, currentPos)

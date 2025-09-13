@@ -3,14 +3,18 @@ package com.example.monitoragricola.raster.store
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileStore
-import com.example.monitoragricola.raster.StoreTile
+import com.example.monitoragricola.raster.StoreTile as EngineStoreTile
 import com.example.monitoragricola.raster.RasterSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
+
+// Alias do StoreTile de storage (payload serializado)
+import com.example.monitoragricola.raster.StoreTile as StoreStoreTile
 
 class RoomTileStore(
     private val db: RasterDatabase,
@@ -19,39 +23,60 @@ class RoomTileStore(
 
     private val dao = db.rasterTileDao()
 
-    private val cache = ConcurrentHashMap<TileKey, StoreTile>()
+    // cache guarda o StoreTile do ENGINE
+    private val cache = ConcurrentHashMap<TileKey, EngineStoreTile>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * loadTile é síncrona no engine → use runBlocking, sem withTransaction.
+     * loadTile é síncrona no engine → usar runBlocking(Dispatchers.IO).
+     * Decodifica payload (GZIP) e mapeia StoreTile de storage -> engine.
      */
-    override fun loadTile(tx: Int, ty: Int): StoreTile? {
+    override fun loadTile(tx: Int, ty: Int): EngineStoreTile? {
         val key = TileKey(tx, ty)
         cache[key]?.let { return it }
 
         return runBlocking(Dispatchers.IO) {
             val e = dao.getTile(jobId, tx, ty) ?: return@runBlocking null
-            // payload → StoreTile
-            val st = TileCodec.decode(e.payload).storeTile
-            cache[key] = st
-            st
+
+            // Decodifica payload para o StoreTile de STORAGE
+            val decoded = TileCodec.decode(e.payload)
+            val st: StoreStoreTile = decoded.storeTile
+
+            // Mapeia para o StoreTile do ENGINE (exposto pela interface)
+            val eng = EngineStoreTile(
+                tx = tx,
+                ty = ty,
+                rev = e.rev,
+                layerMask = e.layerMask,
+                count = st.count,
+                sections = st.sections,
+                rate = st.rate,
+                speed = st.speed,
+                lastStrokeId = st.lastStrokeId,
+                frontStamp = st.frontStamp
+            )
+
+            cache[key] = eng
+            eng
         }
     }
 
     /**
      * Worker do engine já é coroutine → aqui é suspend normal.
+     * Monta StoreTile de STORAGE para serializar, e faz upsert em IO.
      */
     override suspend fun saveDirtyTilesAndClear(batch: List<Pair<TileKey, TileData>>) {
         if (batch.isEmpty()) return
 
-        val entities = ArrayList<RasterTileEntity>(batch.size)
         val now = System.currentTimeMillis()
+        val entities = ArrayList<RasterTileEntity>(batch.size)
 
+        // Construção e encode podem ser CPU-bound, mas manter simples:
         for ((key, tile) in batch) {
             val ts = tile.tileSize
 
-            // Monte o StoreTile com os buffers atuais do TileData
-            val st = StoreTile(
+            // Monte o StoreTile de STORAGE com os buffers atuais do TileData
+            val st = StoreStoreTile(
                 tx = key.tx,
                 ty = key.ty,
                 rev = tile.rev,
@@ -78,7 +103,10 @@ class RoomTileStore(
             )
         }
 
-        dao.upsertTiles(entities)
+        // I/O de fato em dispatcher de IO
+        withContext(Dispatchers.IO) {
+            dao.upsertTiles(entities)
+        }
     }
 
     override fun snapshot(meta: RasterSnapshot) {
@@ -87,22 +115,37 @@ class RoomTileStore(
 
     override fun restore(): RasterSnapshot? = null
 
-    override fun clear() = runBlocking {
-        // Remove all tiles associated with this job
+    override fun clear() = runBlocking(Dispatchers.IO) {
         dao.deleteByJob(jobId)
         cache.clear()
     }
 
     /**
-     * Prefetch tiles asynchronously so callers avoid blocking the UI thread.
+     * Prefetch assíncrono (IO) e cache em memória.
      */
     fun prefetchTiles(keys: Iterable<TileKey>) {
         scope.launch {
             for (key in keys) {
                 if (cache.containsKey(key)) continue
                 val e = dao.getTile(jobId, key.tx, key.ty) ?: continue
-                val st = TileCodec.decode(e.payload).storeTile
-                cache[key] = st
+
+                val decoded = TileCodec.decode(e.payload)
+                val st: StoreStoreTile = decoded.storeTile
+
+                val eng = EngineStoreTile(
+                    tx = key.tx,
+                    ty = key.ty,
+                    rev = e.rev,
+                    layerMask = e.layerMask,
+                    count = st.count,
+                    sections = st.sections,
+                    rate = st.rate,
+                    speed = st.speed,
+                    lastStrokeId = st.lastStrokeId,
+                    frontStamp = st.frontStamp
+                )
+
+                cache[key] = eng
             }
         }
     }

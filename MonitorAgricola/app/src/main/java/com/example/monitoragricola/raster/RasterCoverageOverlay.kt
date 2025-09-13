@@ -24,7 +24,6 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
 
     override fun draw(canvas: Canvas, projection: Projection) {
         val bb = map.boundingBox
-        engine.updateViewport(bb)
         drawVisibleTiles(canvas, projection, bb)
     }
 
