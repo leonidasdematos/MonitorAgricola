@@ -189,8 +189,8 @@ class TrabalhosActivity : AppCompatActivity() {
             .setPositiveButton("Continuar") { _, _ ->
                 val nome = input.text?.toString()?.ifBlank { null } ?: return@setPositiveButton
                 // Se há snapshot do modo livre disponível, ofereça as opções:
-                val hasFreeSnapshot = (application as com.example.monitoragricola.App).freeModeRaster != null
-
+                val app = application as com.example.monitoragricola.App
+                val hasFreeSnapshot = java.io.File(app.freeModeTilePath).exists()
                 val options = if (hasFreeSnapshot)
                     arrayOf("Criar e iniciar (vazio)", "Criar e iniciar copiando do Modo Livre")
                 else

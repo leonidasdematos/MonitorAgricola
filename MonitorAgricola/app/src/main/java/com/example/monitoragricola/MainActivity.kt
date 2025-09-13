@@ -48,6 +48,11 @@ import com.example.monitoragricola.raster.HotVizMode
 import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.store.SqliteTileStore
 import com.example.monitoragricola.raster.store.TileStoreRoom
+import com.example.monitoragricola.raster.SqliteTileStore
+import com.example.monitoragricola.raster.TileStore
+import com.example.monitoragricola.raster.TileKey
+import com.example.monitoragricola.raster.TileData
+import com.example.monitoragricola.raster.RasterSnapshot
 
 private const val TAG_RASTER = "RASTER"
 
@@ -82,6 +87,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rasterOverlay: RasterCoverageOverlay
 
     private var mapReady = false
+
+    private val freeTileStore by lazy { SqliteTileStore(this, app.freeModeTilePath) }
+    private val noopTileStore = object : TileStore {
+        override fun loadTile(tx: Int, ty: Int) = null
+        override fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
+        override fun snapshot(meta: RasterSnapshot) {}
+        override fun restore(): RasterSnapshot? = null
+        override fun clear() {}
+    }
+
 
     private val freeModeStore by lazy { SqliteTileStore(this, "free_mode_tiles.db") }
     private var currentTileStore: TileStore? = null
@@ -219,40 +234,37 @@ class MainActivity : AppCompatActivity() {
 
                 val importFree = intent.getBooleanExtra("import_free_mode", false)
                 if (importFree) {
-                    val snap = app.freeModeRaster
+                    val snap = withContext(Dispatchers.IO) { freeTileStore.restore() }
                     if (snap != null) {
-                        // 1) Carrega o snapshot do modo livre no engine atual
                         rasterEngine.importSnapshot(snap)
-                        // 2) Salva no job (vira o “estado inicial” do job)
                         job?.let { safeJob ->
-                            val store = TileStoreRoom(app.rasterDb, safeJob.id)
-                            rasterEngine.attachStore(store)
-                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, store, rasterEngine) }
-                            rasterEngine.attachStore(freeModeStore)                        }                        // 3) Opcional: NÃO apague o freeModeRaster aqui — a ideia é não perder o modo livre
-                        //    (ele só é limpo quando o usuário quiser explicitamente).
+                            withContext(Dispatchers.IO) { jobManager.saveRaster(safeJob.id, rasterEngine) }
                     }
+                    withContext(Dispatchers.IO) { freeTileStore.clear() }
+                    app.clearFreeModeTileStore()
+                    rasterEngine.attachStore(noopTileStore)
                 }
+            }
 
 
-                if (job == null) {
-                    Toast.makeText(this@MainActivity, "Trabalho não encontrado.", Toast.LENGTH_SHORT).show()
-                } else {
-                    // força snapshot do job e persiste seleção
-                    selectImplementoFromJob(job)
-                    selectedJobId = job.id
-                    ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
-
+            if (job == null) {
+                Toast.makeText(this@MainActivity, "Trabalho não encontrado.", Toast.LENGTH_SHORT).show()
+            } else {
+                // força snapshot do job e persiste seleção
+                selectImplementoFromJob(job)
+                selectedJobId = job.id
+                ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
                     // Restaura cobertura raster no mapa (pausado)
-                    restoreRasterOnMap(job.id)
+                restoreRasterOnMap(job.id)
 
-                    btnLigar.setImageResource(android.R.drawable.ic_media_play)
-                    refreshJobsButtonColor()
-                    refreshImplementosButtonColor()
-                    refreshPlayButtonColor()
-                    refreshJobState()
-                    Toast.makeText(this@MainActivity, "Trabalho selecionado (aguardando ▶).", Toast.LENGTH_SHORT).show()
-                    clearResumeExtras()
-                }
+                btnLigar.setImageResource(android.R.drawable.ic_media_play)
+                refreshJobsButtonColor()
+                refreshImplementosButtonColor()
+                refreshPlayButtonColor()
+                refreshJobState()
+                Toast.makeText(this@MainActivity, "Trabalho selecionado (aguardando ▶).", Toast.LENGTH_SHORT).show()
+                clearResumeExtras()
+            }
                 syncPlayUi()
                 clearResumeExtras()
                 return@launch
@@ -272,13 +284,13 @@ class MainActivity : AppCompatActivity() {
                     tvImplemento.text = "Nenhum implemento selecionado"
                 }
 
-                // NÃO chame clearRasterFromMap() aqui.
-                // Se houver snapshot do modo livre, já injeta no engine e redesenha:
-                app.freeModeRaster?.let { snap ->
+                rasterEngine.attachStore(freeTileStore)
+                val snap = withContext(Dispatchers.IO) { freeTileStore.restore() }
+                if (snap != null) {
                     rasterEngine.importSnapshot(snap)
                     rasterOverlay.invalidateTiles()
                     map.invalidate()
-                } ?: run {
+                } else {
                     // se não tiver snapshot, apenas garanta o redraw
                     rasterEngine.invalidateTiles()
                     map.invalidate()
@@ -425,7 +437,7 @@ class MainActivity : AppCompatActivity() {
         if (selectedJobId == null) {
             runCatching {
                 val snap = rasterEngine.exportSnapshot()
-                app.freeModeRaster = snap
+                freeTileStore.snapshot(snap)
             }
         }
     }
@@ -441,9 +453,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         } else {
-            // modo livre: ainda usamos snapshot em memória
             val snap = runCatching { rasterEngine.exportSnapshot() }.getOrNull()
-            if (snap != null) app.freeModeRaster = snap
+            if (snap != null) freeTileStore.snapshot(snap)
         }
 
         // 2) decidir background
@@ -841,9 +852,8 @@ class MainActivity : AppCompatActivity() {
                     if (id != null && store != null) {
                         jobManager.saveRaster(id, store, rasterEngine)
                     } else {
-                        // Modo livre: checkpoint rápido em memória
                         val snap = rasterEngine.exportSnapshot()
-                        app.freeModeRaster = snap
+                        freeTileStore.snapshot(snap)
                     }
                 } catch (_: Throwable) { /* silencioso */ }
                 delay(CHECKPOINT_INTERVAL_MS)
@@ -988,6 +998,7 @@ class MainActivity : AppCompatActivity() {
     /* ======================= Raster helpers ======================= */
 
     private fun restoreRasterOnMap(jobId: Long) {
+        rasterEngine.attachStore(noopTileStore)
         lifecycleScope.launch {
             val ok = withContext(Dispatchers.IO) {
                 // Novo fluxo: injeta direto no engine; true se encontrou e carregou
@@ -1018,7 +1029,8 @@ class MainActivity : AppCompatActivity() {
     private fun clearRasterFromMap() {
         rasterEngine.clearCoverage()
         rasterOverlay.invalidateTiles()
-        app.freeModeRaster = null
+        freeTileStore.clear()
+        app.clearFreeModeTileStore()
         map.invalidate()
     }
 
@@ -1411,22 +1423,17 @@ class MainActivity : AppCompatActivity() {
             Log.d("RASTER", "origin=${rasterEngine.currentOriginLat()},${rasterEngine.currentOriginLon()} res=${rasterEngine.currentResolutionM()} tile=${rasterEngine.currentTileSize()}")
 
 
-            // Força redesenho:
             rasterEngine.invalidateTiles()
-            // Se seu RasterCoverageOverlay tiver invalidateTiles(), pode chamar também:
-            // rasterOverlay.invalidateTiles()
             map.invalidate()
         } else {
             // Modo livre
-            val snap = app.freeModeRaster
+            rasterEngine.attachStore(freeTileStore)
+            val snap = freeTileStore.restore()
             if (snap != null) {
-                // Seu engine define importSnapshot(Snapshot) — perfeito
                 rasterEngine.importSnapshot(snap)
             } else {
-                // nada pra restaurar; apenas garanta o redraw
             }
             rasterEngine.invalidateTiles()
-            // rasterOverlay.invalidateTiles() // se existir
             map.invalidate()
         }
     }
