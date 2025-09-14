@@ -1,5 +1,7 @@
 package com.example.monitoragricola.raster.store
 
+import android.util.LruCache
+import android.util.Log
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileStore
@@ -11,20 +13,21 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 
 // Alias do StoreTile de storage (payload serializado)
 import com.example.monitoragricola.raster.StoreTile as StoreStoreTile
 
 class RoomTileStore(
     private val db: RasterDatabase,
-    private val jobId: Long
-) : TileStore {
+    private val jobId: Long,
+    private val maxCacheTiles: Int = 128) : TileStore {
 
     private val dao = db.rasterTileDao()
 
-    // cache guarda o StoreTile do ENGINE
-    private val cache = ConcurrentHashMap<TileKey, EngineStoreTile>()
+    // cache guarda o StoreTile do ENGINE com LRU e limite
+    private val cache = object : LruCache<TileKey, EngineStoreTile>(maxCacheTiles) {
+        override fun sizeOf(key: TileKey, value: EngineStoreTile): Int = 1
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
@@ -33,7 +36,7 @@ class RoomTileStore(
      */
     override fun loadTile(tx: Int, ty: Int): EngineStoreTile? {
         val key = TileKey(tx, ty)
-        cache[key]?.let { return it }
+        cache.get(key)?.let { return it }
 
         return runBlocking(Dispatchers.IO) {
             val e = dao.getTile(jobId, tx, ty) ?: return@runBlocking null
@@ -56,7 +59,8 @@ class RoomTileStore(
                 frontStamp = st.frontStamp
             )
 
-            cache[key] = eng
+            logMem()
+            cache.put(key, eng)
             eng
         }
     }
@@ -101,6 +105,9 @@ class RoomTileStore(
                 payload = payload,
                 updatedAt = now
             )
+
+            // remove do cache para liberar arrays associados
+            cache.remove(key)
         }
 
         // I/O de fato em dispatcher de IO
@@ -117,7 +124,7 @@ class RoomTileStore(
 
     override fun clear() = runBlocking(Dispatchers.IO) {
         dao.deleteByJob(jobId)
-        cache.clear()
+        cache.evictAll()
     }
 
     /**
@@ -126,7 +133,7 @@ class RoomTileStore(
     fun prefetchTiles(keys: Iterable<TileKey>) {
         scope.launch {
             for (key in keys) {
-                if (cache.containsKey(key)) continue
+                if (cache.get(key) != null) continue
                 val e = dao.getTile(jobId, key.tx, key.ty) ?: continue
 
                 val decoded = TileCodec.decode(e.payload)
@@ -145,8 +152,13 @@ class RoomTileStore(
                     frontStamp = st.frontStamp
                 )
 
-                cache[key] = eng
+                cache.put(key, eng)
             }
         }
+    }
+
+    /** Opcional: log do tamanho do cache em memória */
+    fun logMem(tag: String = "RoomTileStore") {
+        Log.d(tag, "cacheSize=${cache.size()}")
     }
 }

@@ -181,13 +181,17 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Configuration.getInstance().userAgentValue = packageName
+        //Configuration.getInstance().setMemoryCacheSizePercent(this, 1.0f) // 1% da heap
+        Configuration.getInstance().setTileFileSystemCacheMaxBytes(50L * 1024 * 1024) // 50 MB em disco
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        Configuration.getInstance().cacheMapTileCount = 20.toShort() // limite de tiles na RAM
         setContentView(R.layout.activity_main)
 
         coldStart = (savedInstanceState == null) // só é true no primeiro launch desse processo/atividade
 
 
         map = findViewById(R.id.map)
+        //map.tileProvider.tileCache.setCacheSize(20) // limite de tiles na RAM
         tvVelocidade = findViewById(R.id.tvVelocidade)
         tvImplemento = findViewById(R.id.tvImplemento)
         tvArea = findViewById(R.id.tvArea)
