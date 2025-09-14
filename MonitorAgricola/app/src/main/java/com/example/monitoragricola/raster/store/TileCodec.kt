@@ -5,10 +5,9 @@ import java.io.*
 import com.example.monitoragricola.raster.StoreTile
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
-import kotlin.experimental.and
 
 private const val MAGIC = 0x52415354  // 'RAST'
-private const val VERSION = 1
+private const val VERSION = 2
 
 /** Flags de presença de camadas opcionais. */
 private object F {
@@ -16,6 +15,8 @@ private object F {
     const val RATE     = 1 shl 1
     const val SPEED    = 1 shl 2
     const val FRONT    = 1 shl 3
+    const val STROKE   = 1 shl 4
+
 }
 
 /** count(Byte), lastStrokeId(Short) são sempre presentes. Demais por flags. */
@@ -36,13 +37,15 @@ object TileCodec {
             if (st.rate     != null) flags = flags or F.RATE
             if (st.speed    != null) flags = flags or F.SPEED
             if (st.frontStamp != null) flags = flags or F.FRONT
+            if (st.lastStrokeId != null) flags = flags or F.STROKE
+
             out.writeInt(flags)
 
             // obrigatórios
             writeByteArray(out, st.count)
-            writeShortArray(out, st.lastStrokeId)
 
             // opcionais
+            if (st.lastStrokeId != null) writeShortArray(out, st.lastStrokeId)
             if (st.sections != null) writeIntArray(out, st.sections)
             if (st.rate     != null) writeFloatArray(out, st.rate)
             if (st.speed    != null) writeFloatArray(out, st.speed)
@@ -65,7 +68,7 @@ object TileCodec {
             val flags = inp.readInt()
 
             val count = readByteArray(inp)
-            val lastStroke = readShortArray(inp)
+            val lastStroke = if ((flags and F.STROKE) != 0) readShortArray(inp) else null
 
             val sections = if ((flags and F.SECTIONS) != 0) readIntArray(inp) else null
             val rate     = if ((flags and F.RATE)     != 0) readFloatArray(inp) else null

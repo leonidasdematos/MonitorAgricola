@@ -6,7 +6,6 @@ package com.example.monitoragricola.raster
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.Rect
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -17,7 +16,24 @@ import kotlin.math.*
 /** Overlay que desenha somente VIZ (tiles que intersectam o viewport atual). */
 class RasterCoverageOverlay(private val map: MapView, private val engine: RasterCoverageEngine) : Overlay() {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val dst = Rect()
+
+    // objetos reutilizáveis para evitar garbage durante o draw
+    private val matrix = Matrix()
+    private val srcPts = FloatArray(8)
+    private val dstPts = FloatArray(8)
+
+    private val gp00 = GeoPoint(0.0, 0.0)
+    private val gp10 = GeoPoint(0.0, 0.0)
+    private val gp11 = GeoPoint(0.0, 0.0)
+    private val gp01 = GeoPoint(0.0, 0.0)
+
+    private val p00 = android.graphics.Point()
+    private val p10 = android.graphics.Point()
+    private val p11 = android.graphics.Point()
+    private val p01 = android.graphics.Point()
+
+    private val tmp1 = org.locationtech.jts.geom.Coordinate()
+    private val tmp2 = org.locationtech.jts.geom.Coordinate()
 
     fun setHotVizMode(mode: HotVizMode) { engine.setMode(mode); map.postInvalidate() }
     fun invalidateTiles() { engine.invalidateTiles(); map.postInvalidate() }
@@ -30,18 +46,24 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
     private fun drawVisibleTiles(canvas: Canvas, projection: Projection, bb: BoundingBox) {
         val tileSize = engine.currentTileSize()
         val res = engine.currentResolutionM()
-        val ph = engine.currentProjection() ?: return  // <-- use a mesma instância do engine
-        // limites em “pixels do raster” a partir da projeção do ENGINE
-        val p1 = ph.toLocalMeters(bb.latSouth, bb.lonWest)
-        val p2 = ph.toLocalMeters(bb.latNorth, bb.lonEast)
-        val minX = floor(min(p1.x,p2.x) / res).toInt()
-        val maxX = ceil (max(p1.x,p2.x) / res).toInt()
-        val minY = floor(min(p1.y,p2.y) / res).toInt()
-        val maxY = ceil (max(p1.y,p2.y) / res).toInt()
+        engine.currentProjection() ?: return
+
+        val lat0 = engine.currentOriginLat()
+        val lon0 = engine.currentOriginLon()
+        val mPerDegLat = 111_320.0
+        val mPerDegLon = mPerDegLat * cos(Math.toRadians(lat0))
+
+        geoToLocal(lat0, lon0, mPerDegLat, mPerDegLon, bb.latSouth, bb.lonWest, tmp1)
+        geoToLocal(lat0, lon0, mPerDegLat, mPerDegLon, bb.latNorth, bb.lonEast, tmp2)
+        val minX = floor(min(tmp1.x, tmp2.x) / res).toInt()
+        val maxX = ceil(max(tmp1.x, tmp2.x) / res).toInt()
+        val minY = floor(min(tmp1.y, tmp2.y) / res).toInt()
+        val maxY = ceil(max(tmp1.y, tmp2.y) / res).toInt()
+
         val tMinX = floor(minX.toDouble() / tileSize).toInt()
-        val tMaxX = floor((maxX-1).toDouble() / tileSize).toInt()
+        val tMaxX = floor((maxX - 1).toDouble() / tileSize).toInt()
         val tMinY = floor(minY.toDouble() / tileSize).toInt()
-        val tMaxY = floor((maxY-1).toDouble() / tileSize).toInt()
+        val tMaxY = floor((maxY - 1).toDouble() / tileSize).toInt()
 
         for (ty in tMinY..tMaxY) for (tx in tMinX..tMaxX) {
             val bmp = engine.buildOrGetBitmapFor(tx, ty) ?: continue
@@ -51,37 +73,56 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
             val x1m = x0m + tileSize * res
             val y1m = y0m + tileSize * res
 
-            // 4 cantos do tile no espaço geográfico usando a MESMA projeção do engine
-            val gp00 = ph.toLatLon(org.locationtech.jts.geom.Coordinate(x0m, y0m))
-            val gp10 = ph.toLatLon(org.locationtech.jts.geom.Coordinate(x1m, y0m))
-            val gp11 = ph.toLatLon(org.locationtech.jts.geom.Coordinate(x1m, y1m))
-            val gp01 = ph.toLatLon(org.locationtech.jts.geom.Coordinate(x0m, y1m))
+            localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x0m, y0m, gp00)
+            localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x1m, y0m, gp10)
+            localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x1m, y1m, gp11)
+            localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x0m, y1m, gp01)
 
-            // para tela (respeita orientação do mapa)
-            val p00 = android.graphics.Point(); val p10 = android.graphics.Point()
-            val p11 = android.graphics.Point(); val p01 = android.graphics.Point()
+
             projection.toPixels(gp00, p00); projection.toPixels(gp10, p10)
             projection.toPixels(gp11, p11); projection.toPixels(gp01, p01)
 
-            // mapeia (0,0)-(w,0)-(w,h)-(0,h) -> p00-p10-p11-p01
-            val src = floatArrayOf(0f,0f, bmp.width.toFloat(),0f, bmp.width.toFloat(),bmp.height.toFloat(), 0f,bmp.height.toFloat())
-            val dst = floatArrayOf(
-                p00.x.toFloat(), p00.y.toFloat(),
-                p10.x.toFloat(), p10.y.toFloat(),
-                p11.x.toFloat(), p11.y.toFloat(),
-                p01.x.toFloat(), p01.y.toFloat()
-            )
-            val mtx = android.graphics.Matrix().apply { setPolyToPoly(src, 0, dst, 0, 4) }
-            canvas.drawBitmap(bmp, mtx, paint)
+            srcPts[0] = 0f; srcPts[1] = 0f
+            srcPts[2] = bmp.width.toFloat(); srcPts[3] = 0f
+            srcPts[4] = bmp.width.toFloat(); srcPts[5] = bmp.height.toFloat()
+            srcPts[6] = 0f; srcPts[7] = bmp.height.toFloat()
+
+            dstPts[0] = p00.x.toFloat(); dstPts[1] = p00.y.toFloat()
+            dstPts[2] = p10.x.toFloat(); dstPts[3] = p10.y.toFloat()
+            dstPts[4] = p11.x.toFloat(); dstPts[5] = p11.y.toFloat()
+            dstPts[6] = p01.x.toFloat(); dstPts[7] = p01.y.toFloat()
+
+            matrix.reset()
+            matrix.setPolyToPoly(srcPts, 0, dstPts, 0, 4)
+            canvas.drawBitmap(bmp, matrix, paint)
         }
     }
 
-    // Conversão simples de metros locais → geográfico usando origem do job
-    private fun localToGeo(lat0: Double, lon0: Double, xm: Double, ym: Double): GeoPoint {
-        val metersPerDegLat = 111320.0
-        val metersPerDegLon = metersPerDegLat * cos(Math.toRadians(lat0))
-        val lat = lat0 + (ym / metersPerDegLat)
-        val lon = lon0 + (xm / metersPerDegLon)
-        return GeoPoint(lat, lon)
+    private fun localToGeo(
+        lat0: Double,
+        lon0: Double,
+        mPerDegLat: Double,
+        mPerDegLon: Double,
+        xm: Double,
+        ym: Double,
+        out: GeoPoint
+    ): GeoPoint {
+        out.latitude = lat0 + (ym / mPerDegLat)
+        out.longitude = lon0 + (xm / mPerDegLon)
+        return out
+    }
+
+    private fun geoToLocal(
+        lat0: Double,
+        lon0: Double,
+        mPerDegLat: Double,
+        mPerDegLon: Double,
+        lat: Double,
+        lon: Double,
+        out: org.locationtech.jts.geom.Coordinate
+    ): org.locationtech.jts.geom.Coordinate {
+        out.x = (lon - lon0) * mPerDegLon
+        out.y = (lat - lat0) * mPerDegLat
+        return out
     }
 }

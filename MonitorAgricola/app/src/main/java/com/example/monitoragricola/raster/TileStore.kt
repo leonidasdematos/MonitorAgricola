@@ -13,7 +13,7 @@ data class StoreTile(
     val sections: IntArray?,
     val rate: FloatArray?,
     val speed: FloatArray?,
-    val lastStrokeId: ShortArray,
+    val lastStrokeId: ShortArray?,
     val frontStamp: ShortArray?
 )
 

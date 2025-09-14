@@ -28,13 +28,15 @@ class TileData(
     var sections: IntArray? = sections
     var rate: FloatArray? = rate
     var speed: FloatArray? = speed
-    val lastStrokeId: ShortArray = lastStrokeId ?: ShortArray(tileSize * tileSize) // ping-pong por stroke
+    var lastStrokeId: ShortArray? = lastStrokeId // ping-pong por stroke
     var frontStamp: ShortArray? = frontStamp
 
     fun ensureSections() { if (sections == null) { sections = IntArray(tileSize * tileSize); layerMask = layerMask or LAYER_SECTIONS } }
     fun ensureRate()     { if (rate == null)     { rate = FloatArray(tileSize * tileSize); layerMask = layerMask or LAYER_RATE } }
     fun ensureSpeed()    { if (speed == null)    { speed = FloatArray(tileSize * tileSize); layerMask = layerMask or LAYER_SPEED } }
     fun ensureFront()    { if (frontStamp == null){ frontStamp = ShortArray(tileSize * tileSize) } }
+    fun ensureLastStrokeId() { if (lastStrokeId == null){ lastStrokeId = ShortArray(tileSize * tileSize) } }
+
 }
 
 data class TileKey(val tx: Int, val ty: Int) {

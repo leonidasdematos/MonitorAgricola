@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
     private var mapReady = false
     private var lastViewport: BoundingBox? = null
 
-    private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID) }
+    private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID, maxCacheTiles = 64) }
     private val noopTileStore = object : TileStore {
         override  fun loadTile(tx: Int, ty: Int) = null
         override suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
@@ -99,7 +99,6 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private val freeModeStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID) }
     private var currentTileStore: TileStore? = null
 
 
@@ -256,7 +255,7 @@ class MainActivity : AppCompatActivity() {
                                     rasterEngine
                                 )
                             }
-                            rasterEngine.attachStore(freeModeStore)
+                            rasterEngine.attachStore(freeTileStore)
                         }
 
                     freeTileStore.clear()
@@ -524,8 +523,8 @@ class MainActivity : AppCompatActivity() {
                 "Engine startJob: origin=(${currentOriginLat()}, ${currentOriginLon()}) res=${currentResolutionM()} tile=${currentTileSize()}"
             )
         }
-        rasterEngine.attachStore(freeModeStore)
-        currentTileStore = freeModeStore
+        rasterEngine.attachStore(freeTileStore)
+        currentTileStore = freeTileStore
         rasterOverlay = RasterCoverageOverlay(map, rasterEngine)
 
         // Adicione o raster antes do trator, para o trator ficar por cima
@@ -633,8 +632,8 @@ class MainActivity : AppCompatActivity() {
                                 lifecycleScope.launch {
                                     currentTileStore?.let { ts -> jobManager.saveRaster(job.id, ts, rasterEngine) }
                                     jobManager.pause(job.id)
-                                    rasterEngine.attachStore(freeModeStore)
-                                    currentTileStore = freeModeStore
+                                    rasterEngine.attachStore(freeTileStore)
+                                    currentTileStore = freeTileStore
                                     isWorking = false
                                     persistPlayState()
                                     syncPlayUi()
@@ -652,8 +651,8 @@ class MainActivity : AppCompatActivity() {
                                     val areas = rasterEngine.getAreas()
                                     currentTileStore?.let { ts -> jobManager.saveRaster(job.id, ts, rasterEngine) }
                                     jobManager.finish(job.id, areas.totalM2, areas.overlapM2)
-                                    rasterEngine.attachStore(freeModeStore)
-                                    currentTileStore = freeModeStore
+                                    rasterEngine.attachStore(freeTileStore)
+                                    currentTileStore = freeTileStore
                                     ImplementoSelector.clearForce(this@MainActivity)
                                     ImplementosPrefs.clearSelectedJobId(this@MainActivity)
                                     selectedJobId = null
@@ -730,8 +729,8 @@ class MainActivity : AppCompatActivity() {
                     selId?.let { id ->
                         currentTileStore?.let { ts -> jobManager.saveRaster(id, ts, rasterEngine) }
                         withContext(Dispatchers.IO) { jobManager.pause(id) }
-                        rasterEngine.attachStore(freeModeStore)
-                        currentTileStore = freeModeStore
+                        rasterEngine.attachStore(freeTileStore)
+                        currentTileStore = freeTileStore
                         stopCheckpointLoop()
                         Toast.makeText(this@MainActivity, "Trabalho pausado", Toast.LENGTH_SHORT).show()
                     } ?: run {

@@ -11,6 +11,9 @@ import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import kotlin.math.*
 import kotlinx.coroutines.*
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.IntBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
@@ -45,7 +48,7 @@ const val WARN_BMPS_MB = 120.0
 // ===== Config da fila =====
 const val FLUSH_QUEUE_SOFT_LIMIT = 128
 const val FLUSH_BATCH_MAX = 512
-const val FLUSH_WORKERS = 1
+const val FLUSH_WORKERS = 2
 
 class RasterCoverageEngine {
     // ===== Config =====
@@ -117,6 +120,12 @@ class RasterCoverageEngine {
     private val cntBmpAlloc = AtomicLong(0)
     private val cntBmpFree = AtomicLong(0)
     private val cntBmpReuse = AtomicLong(0)
+
+    private val renderBuf: IntBuffer =
+        ByteBuffer.allocateDirect(tileSize * tileSize * 4)
+            .order(ByteOrder.nativeOrder())
+            .asIntBuffer()
+
 
     private var lastMemLogNs = 0L
     private var lastSavedLogged = 0L
@@ -494,9 +503,11 @@ class RasterCoverageEngine {
     }
 
     private fun writePixel(tile: TileData, idx: Int, sectionsMask: Int, rateValue: Float?) {
-        val lastStroke = tile.lastStrokeId[idx]
+        tile.ensureLastStrokeId()
+        val ls = tile.lastStrokeId!!
+        val lastStroke = ls[idx]
         if (lastStroke.toInt() == strokeId) return
-        tile.lastStrokeId[idx] = strokeId.toShort()
+        ls[idx] = strokeId.toShort()
 
         val prev = tile.count[idx].toInt() and 0xFF
         var now = prev
@@ -637,7 +648,11 @@ class RasterCoverageEngine {
                             val t0 = System.nanoTime()
 
                             try {
-                                s.saveDirtyTilesAndClear(batch)
+                                val saveMs = withContext(Dispatchers.Default) {
+                                    val tSave = System.nanoTime()
+                                    s.saveDirtyTilesAndClear(batch)
+                                    max(1L, (System.nanoTime() - tSave) / 1_000_000)
+                                }
                                 for ((k, tile) in batch) {
                                     tile.dirty = false
                                     pendingFlush.remove(k.pack())
@@ -650,8 +665,8 @@ class RasterCoverageEngine {
                                 cntBatches.incrementAndGet()
                                 Log.d(
                                     TAG_FLUSH,
-                                    "worker#$wid SAVED tiles=$tilesCount bytes=%.2fMB dt=%dms qNow=${flushQueue.size} pending=${pendingFlush.size}"
-                                        .format(mb, dtMs)
+                                    "worker#$wid SAVED tiles=$tilesCount bytes=%.2fMB dt=%dms save=%dms qNow=${flushQueue.size} pending=${pendingFlush.size}"
+                                        .format(mb, dtMs, saveMs)
                                 )
                             } catch (e: Throwable) {
                                 for (i in 0 until batch.size) flushQueue.add(batch[i])
@@ -702,73 +717,94 @@ class RasterCoverageEngine {
 
         val bmp = Bitmap.createBitmap(tileSize, tileSize, Bitmap.Config.ARGB_8888)
         cntBmpAlloc.incrementAndGet()
-        val buf = IntArray(tileSize * tileSize)
         when (renderMode) {
-            HotVizMode.COBERTURA -> fillCoverageColors(tile, buf)
-            HotVizMode.SOBREPOSICAO -> fillOverlapColors(tile, buf)
-            HotVizMode.TAXA -> fillRateColors(tile, buf)
-            HotVizMode.VELOCIDADE -> fillSpeedColors(tile, buf)
-            HotVizMode.SECOES -> fillSectionsColors(tile, buf)
+            HotVizMode.COBERTURA -> fillCoverageColors(tile)
+            HotVizMode.SOBREPOSICAO -> fillOverlapColors(tile)
+            HotVizMode.TAXA -> fillRateColors(tile)
+            HotVizMode.VELOCIDADE -> fillSpeedColors(tile)
+            HotVizMode.SECOES -> fillSectionsColors(tile)
         }
-        bmp.setPixels(buf, 0, tileSize, 0, 0, tileSize, tileSize)
+        renderBuf.rewind()
+        bmp.copyPixelsFromBuffer(renderBuf)
         bmpLru.put(key, rev, bmp)
         return bmp
     }
 
-    private fun fillCoverageColors(tile: TileData, out: IntArray) {
-        val n = out.size
+    private fun fillCoverageColors(tile: TileData) {
+        val n = tileSize * tileSize
         for (i in 0 until n) {
             val c = tile.count[i].toInt() and 0xFF
-            out[i] = when {
+            val v = when {
                 c == 0 -> 0
                 c == 1 -> 0x8022AA22.toInt()
                 else -> 0xCCFF2222.toInt()
             }
+            renderBuf.put(i, v)
         }
     }
 
-    private fun fillOverlapColors(tile: TileData, out: IntArray) {
-        val n = out.size
+    private fun fillOverlapColors(tile: TileData) {
+        val n = tileSize * tileSize
         for (i in 0 until n) {
             val c = tile.count[i].toInt() and 0xFF
-            out[i] = if (c <= 1) 0 else 0xCCFF2222.toInt()
+            val v = if (c <= 1) 0 else 0xCCFF2222.toInt()
+            renderBuf.put(i, v)
         }
     }
 
-    private fun fillRateColors(tile: TileData, out: IntArray) {
-        val r = tile.rate ?: run { java.util.Arrays.fill(out, 0); return }
-        val n = out.size
+    private fun fillRateColors(tile: TileData) {
+        val r = tile.rate
+        val n = tileSize * tileSize
+        if (r == null) {
+            for (i in 0 until n) {
+                renderBuf.put(i, 0)
+            }
+            return
+        }
         for (i in 0 until n) {
             val v = r[i]
             val t = (v / 100f).coerceIn(0f, 1f)
             val g = (t * 255).toInt(); val b = (255 - g)
-            out[i] = (0xFF shl 24) or (0 shl 16) or (g shl 8) or (b)
+            renderBuf.put(i, (0xFF shl 24) or (0 shl 16) or (g shl 8) or (b))
         }
     }
 
-    private fun fillSpeedColors(tile: TileData, out: IntArray) {
-        val s = tile.speed ?: run { java.util.Arrays.fill(out, 0); return }
-        val n = out.size
+    private fun fillSpeedColors(tile: TileData) {
+        val s = tile.speed
+        val n = tileSize * tileSize
+        if (s == null) {
+            for (i in 0 until n) {
+                renderBuf.put(i, 0)
+            }
+            return
+        }
         for (i in 0 until n) {
             val v = s[i]
             val t = (v / 20f).coerceIn(0f, 1f)
             val r = (t * 255).toInt(); val g = (255 - r)
-            out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or 0
+            renderBuf.put(i, (0xFF shl 24) or (r shl 16) or (g shl 8) or 0)
         }
     }
 
-    private fun fillSectionsColors(tile: TileData, out: IntArray) {
-        val sec = tile.sections ?: run { java.util.Arrays.fill(out, 0); return }
-        val n = out.size
+    private fun fillSectionsColors(tile: TileData) {
+        val sec = tile.sections
+        val n = tileSize * tileSize
+        if (sec == null) {
+            for (i in 0 until n) {
+                renderBuf.put(i, 0)
+            }
+            return
+        }
         for (i in 0 until n) {
             val m = sec[i]
-            out[i] = when {
+            val v = when {
                 m == 0 -> 0
                 m and 1 != 0 -> 0xFF0066FF.toInt()
                 m and 2 != 0 -> 0xFF00CC66.toInt()
                 m and 4 != 0 -> 0xFFFFBB00.toInt()
                 else -> 0xFF999999.toInt()
             }
+            renderBuf.put(i, v)
         }
     }
 
@@ -776,7 +812,13 @@ class RasterCoverageEngine {
     fun exportSnapshot(): RasterSnapshot {
         val list = tiles.entries.map { (k, t) ->
             val key = TileKey.unpack(k)
-            SnapshotTile(key.tx, key.ty, t.rev, t.layerMask, t.count.copyOf(), t.lastStrokeId.copyOf(), t.sections?.copyOf(), t.rate?.copyOf(), t.speed?.copyOf(), t.frontStamp?.copyOf())
+            t.ensureLastStrokeId()
+            SnapshotTile(
+                key.tx, key.ty, t.rev, t.layerMask,
+                t.count.copyOf(),
+                t.lastStrokeId!!.copyOf(),
+                t.sections?.copyOf(), t.rate?.copyOf(), t.speed?.copyOf(), t.frontStamp?.copyOf()
+            )
         }
         return RasterSnapshot(originLat, originLon, resolutionM, tileSize, list)
     }
@@ -810,7 +852,7 @@ class RasterCoverageEngine {
         val px = (tileSize * tileSize).toLong()
         var bytes = 0L
         bytes += px * 1 // count: ByteArray
-        bytes += px * 2 // lastStrokeId: ShortArray
+        if (t.lastStrokeId != null) bytes += px * 2 // lastStrokeId: ShortArray
         if (t.frontStamp != null) bytes += px * 2
         if (t.sections != null) bytes += px * 4
         if (t.rate != null) bytes += px * 4

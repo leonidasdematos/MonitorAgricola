@@ -20,13 +20,13 @@ import com.example.monitoragricola.raster.StoreTile as StoreStoreTile
 class RoomTileStore(
     private val db: RasterDatabase,
     private val jobId: Long,
-    private val maxCacheTiles: Int = 128) : TileStore {
+    private val maxCacheTiles: Int = 16) : TileStore {
 
     private val dao = db.rasterTileDao()
 
-    // cache guarda o StoreTile do ENGINE com LRU e limite
-    private val cache = object : LruCache<TileKey, EngineStoreTile>(maxCacheTiles) {
-        override fun sizeOf(key: TileKey, value: EngineStoreTile): Int = 1
+    // cache guarda apenas o payload comprimido para minimizar uso de heap
+    private val cache = object : LruCache<TileKey, ByteArray>(maxCacheTiles) {
+        override fun sizeOf(key: TileKey, value: ByteArray): Int = 1
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -36,21 +36,35 @@ class RoomTileStore(
      */
     override fun loadTile(tx: Int, ty: Int): EngineStoreTile? {
         val key = TileKey(tx, ty)
-        cache.get(key)?.let { return it }
-
+        cache.get(key)?.let { bytes ->
+            val st: StoreStoreTile = TileCodec.decode(bytes).storeTile
+            return EngineStoreTile(
+                tx = st.tx,
+                ty = st.ty,
+                rev = st.rev,
+                layerMask = st.layerMask,
+                count = st.count,
+                sections = st.sections,
+                rate = st.rate,
+                speed = st.speed,
+                lastStrokeId = st.lastStrokeId,
+                frontStamp = st.frontStamp
+            )
+        }
         return runBlocking(Dispatchers.IO) {
             val e = dao.getTile(jobId, tx, ty) ?: return@runBlocking null
 
             // Decodifica payload para o StoreTile de STORAGE
-            val decoded = TileCodec.decode(e.payload)
-            val st: StoreStoreTile = decoded.storeTile
+            cache.put(key, e.payload)
+
+            val st: StoreStoreTile = TileCodec.decode(e.payload).storeTile
 
             // Mapeia para o StoreTile do ENGINE (exposto pela interface)
             val eng = EngineStoreTile(
-                tx = tx,
-                ty = ty,
-                rev = e.rev,
-                layerMask = e.layerMask,
+                tx = st.tx,
+                ty = st.ty,
+                rev = st.rev,
+                layerMask = st.layerMask,
                 count = st.count,
                 sections = st.sections,
                 rate = st.rate,
@@ -60,7 +74,6 @@ class RoomTileStore(
             )
 
             logMem()
-            cache.put(key, eng)
             eng
         }
     }
@@ -89,7 +102,7 @@ class RoomTileStore(
                 sections = tile.sections,          // pode ser null
                 rate = tile.rate,                  // pode ser null
                 speed = tile.speed,                // pode ser null
-                lastStrokeId = tile.lastStrokeId,  // ShortArray existente no TileData
+                lastStrokeId = tile.lastStrokeId,  // pode ser null
                 frontStamp = tile.frontStamp       // pode ser null
             )
 
@@ -107,8 +120,8 @@ class RoomTileStore(
             )
 
             // remove do cache para liberar arrays associados
-            cache.remove(key)
-        }
+            // atualiza cache com payload comprimido
+            cache.put(key, payload)        }
 
         // I/O de fato em dispatcher de IO
         withContext(Dispatchers.IO) {
@@ -136,23 +149,8 @@ class RoomTileStore(
                 if (cache.get(key) != null) continue
                 val e = dao.getTile(jobId, key.tx, key.ty) ?: continue
 
-                val decoded = TileCodec.decode(e.payload)
-                val st: StoreStoreTile = decoded.storeTile
+                cache.put(key, e.payload)
 
-                val eng = EngineStoreTile(
-                    tx = key.tx,
-                    ty = key.ty,
-                    rev = e.rev,
-                    layerMask = e.layerMask,
-                    count = st.count,
-                    sections = st.sections,
-                    rate = st.rate,
-                    speed = st.speed,
-                    lastStrokeId = st.lastStrokeId,
-                    frontStamp = st.frontStamp
-                )
-
-                cache.put(key, eng)
             }
         }
     }
