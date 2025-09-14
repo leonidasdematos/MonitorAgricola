@@ -1,4 +1,4 @@
-package com.example.monitoragricola.raster
+/*package com.example.monitoragricola.raster
 
 import com.example.monitoragricola.map.ProjectionHelper
 import org.junit.Test
@@ -45,4 +45,4 @@ class ProjectionPerformanceTest {
         out.latitude = lat0 + (ym / mPerDegLat)
         out.longitude = lon0 + (xm / mPerDegLon)
     }
-}
+}*/

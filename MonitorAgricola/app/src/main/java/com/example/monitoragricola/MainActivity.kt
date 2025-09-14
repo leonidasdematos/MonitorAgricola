@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
     private var mapReady = false
     private var lastViewport: BoundingBox? = null
 
-    private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID, maxCacheTiles = 64) }
+    private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID, maxCacheTiles = 16) }
     private val noopTileStore = object : TileStore {
         override  fun loadTile(tx: Int, ty: Int) = null
         override suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
