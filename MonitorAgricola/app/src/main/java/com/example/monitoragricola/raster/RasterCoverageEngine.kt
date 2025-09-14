@@ -646,13 +646,17 @@ class RasterCoverageEngine {
                             for ((_, t) in batch) bytes += estimateTileBytes(t)
                             val tilesCount = batch.size
                             val t0 = System.nanoTime()
+                            val optBefore = optArrCount()
+
 
                             try {
                                 val saveMs = withContext(Dispatchers.Default) {
                                     val tSave = System.nanoTime()
                                     s.saveDirtyTilesAndClear(batch)
+                                    for ((_, tile) in batch) tile.clearOptionalArrays()
                                     max(1L, (System.nanoTime() - tSave) / 1_000_000)
                                 }
+                                val optAfter = optArrCount()
                                 for ((k, tile) in batch) {
                                     tile.dirty = false
                                     pendingFlush.remove(k.pack())
@@ -665,7 +669,7 @@ class RasterCoverageEngine {
                                 cntBatches.incrementAndGet()
                                 Log.d(
                                     TAG_FLUSH,
-                                    "worker#$wid SAVED tiles=$tilesCount bytes=%.2fMB dt=%dms save=%dms qNow=${flushQueue.size} pending=${pendingFlush.size}"
+                                    "worker#$wid SAVED tiles=$tilesCount bytes=%.2fMB dt=%dms save=%dms optArr=$optBefore->$optAfter qNow=${flushQueue.size} pending=${pendingFlush.size}"
                                         .format(mb, dtMs, saveMs)
                                 )
                             } catch (e: Throwable) {
@@ -699,7 +703,7 @@ class RasterCoverageEngine {
                     if (stuck > 0) {
                         Log.w(TAG_Q, "PENDING_STUCK count=$stuck oldest=${oldestMs}ms qNow=${flushQueue.size} pending=${pendingFlush.size}")
                     }
-                    logMem()
+                    logMem(force = true)
                     delay(WATCHDOG_INTERVAL_MS)
                 }
             }
@@ -715,8 +719,12 @@ class RasterCoverageEngine {
         val rev = tile.rev
         bmpLru.get(key, rev)?.let { cntBmpReuse.incrementAndGet(); return it }
 
-        val bmp = Bitmap.createBitmap(tileSize, tileSize, Bitmap.Config.ARGB_8888)
-        cntBmpAlloc.incrementAndGet()
+        val (bmp, reusedFromPool) = BitmapLRU.obtain(tileSize, tileSize)
+        if (reusedFromPool) {
+            cntBmpReuse.incrementAndGet()
+        } else {
+            cntBmpAlloc.incrementAndGet()
+        }
         when (renderMode) {
             HotVizMode.COBERTURA -> fillCoverageColors(tile)
             HotVizMode.SOBREPOSICAO -> fillOverlapColors(tile)
@@ -727,6 +735,7 @@ class RasterCoverageEngine {
         renderBuf.rewind()
         bmp.copyPixelsFromBuffer(renderBuf)
         bmpLru.put(key, rev, bmp)
+        //Log.d(TAG_MEM, "alloc=${cntBmpAlloc.get()} reuse=${cntBmpReuse.get()}")
         return bmp
     }
 
@@ -846,7 +855,6 @@ class RasterCoverageEngine {
         return used / (1024.0 * 1024.0)
     }
 
-    private fun heapNativeMB(): Double = Debug.getNativeHeapAllocatedSize() / (1024.0 * 1024.0)
 
     private fun estimateTileBytes(t: TileData): Long {
         val px = (tileSize * tileSize).toLong()
@@ -860,6 +868,18 @@ class RasterCoverageEngine {
         return bytes
     }
 
+    private fun optArrCount(): Int {
+        var c = 0
+        for (t in tiles.values) {
+            if (t.sections != null) c++
+            if (t.rate != null) c++
+            if (t.speed != null) c++
+            if (t.lastStrokeId != null) c++
+        }
+        return c
+    }
+
+
     private fun estimateBmpLruBytes(): Long {
         val px = (tileSize * tileSize).toLong()
         return bmpLru.size().toLong() * px * 4 // ARGB_8888
@@ -871,19 +891,21 @@ class RasterCoverageEngine {
         val withSections: Int,
         val withRate: Int,
         val withSpeed: Int,
+        val withLast: Int,
         val approxBytesTiles: Long,
         val approxBytesBitmaps: Long,
         val flushQueueSize: Int,
     )
 
     private fun memBreakdown(): MemBreakdown {
-        var wf = 0; var ws = 0; var wr = 0; var wv = 0
+        var wf = 0; var ws = 0; var wr = 0; var wv = 0; var wl = 0
         var sumBytes = 0L
         for (t in tiles.values) {
             if (t.frontStamp != null) wf++
             if (t.sections != null) ws++
             if (t.rate != null) wr++
             if (t.speed != null) wv++
+            if (t.lastStrokeId != null) wl++
             sumBytes += estimateTileBytes(t)
         }
         val bmpBytes = estimateBmpLruBytes()
@@ -893,24 +915,27 @@ class RasterCoverageEngine {
             withSections = ws,
             withRate = wr,
             withSpeed = wv,
+            withLast = wl,
             approxBytesTiles = sumBytes,
             approxBytesBitmaps = bmpBytes,
             flushQueueSize = flushQueue.size
         )
     }
 
-    fun logMem(tag: String = TAG_MEM) {
+    fun logMem(tag: String = TAG_MEM, force: Boolean = false) {
         val now = System.nanoTime()
         val since = (now - lastMemLogNs) / 1_000_000
-        if (since < MEM_LOG_INTERVAL_MS && lastMemLogNs != 0L) return
+        if (!force && since < MEM_LOG_INTERVAL_MS && lastMemLogNs != 0L) return
         lastMemLogNs = now
 
         val ds = debugStats()
         val mb = memBreakdown()
         val tilesMB = mb.approxBytesTiles / (1024.0 * 1024.0)
-        val bitmapsMB = mb.approxBytesBitmaps / (1024.0 * 1024.0)
+        val bmpPoolMB = mb.approxBytesBitmaps / (1024.0 * 1024.0)
         val heapMB = heapJavaMB()
-        val nativeMB = heapNativeMB()
+        val nativeMB = Debug.getNativeHeapAllocatedSize() / (1024.0 * 1024.0)
+        val pssMB = Debug.getPss() / 1024.0
+        val optArrays = mb.withFront + mb.withSections + mb.withRate + mb.withSpeed + mb.withLast
 
         val enq = cntEnqueued.get(); val sav = cntSaved.get()
         val dEnq = enq - lastEnqLogged; val dSav = sav - lastSavedLogged
@@ -920,16 +945,16 @@ class RasterCoverageEngine {
             if (heapMB > WARN_HEAP_MB) append(" HEAP!")
             if (nativeMB > WARN_NATIVE_MB) append(" NATIVE!")
             if (tilesMB > WARN_TILES_MB) append(" TILES!")
-            if (bitmapsMB > WARN_BMPS_MB) append(" BMPS!")
+            if (bmpPoolMB > WARN_BMPS_MB) append(" BMPS!")
         }
 
         Log.d(tag,
             "tileSize=${ds.tileSize} res=${"%.2f".format(ds.resolutionM)} " +
                     "HOTr=${ds.hotRadius} dataTiles=${ds.tilesDataCount} HOT=${ds.hotCount} VIZ=${ds.vizCount} " +
-                    "bmpLRU=${ds.bmpLruSize} dataLRU=${ds.dataLruSize} " +
+                    "bmpLRU=${ds.bmpLruSize} dataLRU=${ds.dataLruSize} bmpPoolMB=${"%.1f".format(bmpPoolMB)} " +
                     "flushQ=${mb.flushQueueSize} pending=${pendingFlush.size} | " +
-                    "layers(front/sections/rate/speed)=${mb.withFront}/${mb.withSections}/${mb.withRate}/${mb.withSpeed} " +
-                    "memTiles=${"%.1f".format(tilesMB)}MB memBmp=${"%.1f".format(bitmapsMB)}MB heap=${"%.1f".format(heapMB)}MB native=${"%.1f".format(nativeMB)}MB | " +
+                    "layers(front/sec/rate/spd/last)=${mb.withFront}/${mb.withSections}/${mb.withRate}/${mb.withSpeed}/${mb.withLast} optArr=$optArrays " +
+                    "memTiles=${"%.1f".format(tilesMB)}MB heap=${"%.1f".format(heapMB)}MB native=${"%.1f".format(nativeMB)}MB pss=${"%.1f".format(pssMB)}MB | " +
                     "Δenq=$dEnq Δsav=$dSav totals(enq=$enq sav=$sav batches=${cntBatches.get()} err=${cntBatchErrors.get()}) | " +
                     "alloc(t=${ds.tileAlloc}/${ds.tileFree}) bmp(a=${ds.bmpAlloc}/r=${ds.bmpReuse}/f=${ds.bmpFree})$warnFlags"
         )

@@ -37,6 +37,29 @@ class TileData(
     fun ensureFront()    { if (frontStamp == null){ frontStamp = ShortArray(tileSize * tileSize) } }
     fun ensureLastStrokeId() { if (lastStrokeId == null){ lastStrokeId = ShortArray(tileSize * tileSize) } }
 
+    /**
+     * Remove arrays opcionais para liberar memória após persistência.
+     */
+    fun clearOptionalArrays() {
+        sections = null
+        rate = null
+        speed = null
+        lastStrokeId = null
+    }
+
+    /**
+     * Número de arrays opcionais atualmente alocados.
+     */
+    fun optArrCount(): Int {
+        var c = 0
+        if (sections != null) c++
+        if (rate != null) c++
+        if (speed != null) c++
+        if (lastStrokeId != null) c++
+        return c
+    }
+
+
 }
 
 data class TileKey(val tx: Int, val ty: Int) {

@@ -4,7 +4,7 @@
 package com.example.monitoragricola.raster
 
 import android.graphics.Bitmap
-import android.util.Log
+import java.util.ArrayDeque
 import java.util.LinkedHashMap
 
 /** LRU genérico de dados (TileData) baseado em LinkedHashMap. */
@@ -23,18 +23,38 @@ internal class TileDataLRU(private val maxEntries: Int) {
     @Synchronized fun clear() = map.clear()
 }
 
-/** LRU de bitmaps com recycle() automático. */
+/** LRU de bitmaps com pool de reciclagem. */
 internal class BitmapLRU(private val maxEntries: Int) {
+    companion object {
+        private val recyclePool = ArrayDeque<Bitmap>()
+
+        @Synchronized
+        fun obtain(width: Int, height: Int): Pair<Bitmap, Boolean> {
+            val bmp = recyclePool.pollFirst()
+            return if (bmp != null) {
+                bmp to true
+            } else {
+                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888) to false
+            }
+        }
+
+        @Synchronized
+        private fun recycle(bmp: Bitmap) {
+            recyclePool.addLast(bmp)
+        }
+    }
+
+
     private val map = object : LinkedHashMap<Long, Pair<Int, Bitmap>>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Pair<Int, Bitmap>>?): Boolean {
             val evict = size > maxEntries
-            if (evict && eldest != null) try { eldest.value.second.recycle() } catch (_: Throwable) {}
+            if (evict && eldest != null) recycle(eldest.value.second)
             return evict
         }
     }
     @Synchronized fun get(key: Long, expectedRev: Int): Bitmap? = map[key]?.let { (rev, bmp) -> if (rev == expectedRev && !bmp.isRecycled) bmp else null }
     @Synchronized fun put(key: Long, rev: Int, bmp: Bitmap) { map[key] = rev to bmp }
-    @Synchronized fun invalidate(key: Long) { map.remove(key)?.second?.recycle() }
-    @Synchronized fun invalidateAll() { map.values.forEach { try { it.second.recycle() } catch (_:Throwable){} }; map.clear() }
+    @Synchronized fun invalidate(key: Long) { map.remove(key)?.second?.let { recycle(it) } }
+    @Synchronized fun invalidateAll() { map.values.forEach { recycle(it.second) }; map.clear() }
     @Synchronized fun size(): Int = map.size
 }
