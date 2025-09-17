@@ -2,6 +2,7 @@ package com.example.monitoragricola.raster.store
 
 import android.util.LruCache
 import android.util.Log
+import com.example.monitoragricola.raster.RasterCoverageEngine
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileStore
@@ -13,6 +14,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.util.LinkedHashSet
+
 
 // Alias do StoreTile de storage (payload serializado)
 import com.example.monitoragricola.raster.StoreTile as StoreStoreTile
@@ -154,6 +157,30 @@ class RoomTileStore(
             }
         }
     }
+
+    suspend fun preloadTiles(engine: RasterCoverageEngine, keys: Collection<TileKey>) {
+        if (keys.isEmpty()) {
+            withContext(Dispatchers.Default) { engine.importTilesFromStore(emptyList()) }
+            return
+        }
+
+        val tiles = withContext(Dispatchers.IO) {
+            val unique = LinkedHashSet(keys)
+            val list = ArrayList<StoreStoreTile>(unique.size)
+            for (key in unique) {
+                val entity = dao.getTile(jobId, key.tx, key.ty) ?: continue
+                cache.put(key, entity.payload)
+                val decoded = TileCodec.decode(entity.payload).storeTile
+                list += decoded
+            }
+            list
+        }
+
+        withContext(Dispatchers.Default) {
+            engine.importTilesFromStore(tiles)
+        }
+    }
+
 
     /** Opcional: log do tamanho do cache em memória */
     fun logMem(tag: String = "RoomTileStore") {

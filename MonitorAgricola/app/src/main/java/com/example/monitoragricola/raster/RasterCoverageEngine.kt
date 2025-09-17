@@ -83,6 +83,8 @@ class RasterCoverageEngine {
     private val rateCountBySection = LongArray(32)
     private var rateSumByArea = 0.0
     private var rateCountByArea = 0L
+    private val totalsLock = Any()
+    private val restoredTotals = ConcurrentHashMap.newKeySet<Long>()
     private var currentSpeedKmh: Float? = null
 
     // Stroke state
@@ -215,8 +217,10 @@ class RasterCoverageEngine {
         cntTileFree.addAndGet(removed.toLong())
         cntBmpFree.addAndGet(freed.toLong())
         totalOncePx = 0; totalOverlapPx = 0
+        sectionPx.fill(0)
         rateSumBySection.fill(0.0); rateCountBySection.fill(0)
         rateSumByArea = 0.0; rateCountByArea = 0
+        restoredTotals.clear()
         Log.i(TAG_EVT, "clearCoverage tilesFreed=$removed bmpFreed=$freed")
         logMem()
     }
@@ -255,6 +259,7 @@ class RasterCoverageEngine {
             if (existing == null) {
                 val st = store?.loadTile(tx, ty)
                 val td = if (st != null) tileFromStore(st) else TileData(tileSize)
+                if (st == null) restoredTotals.add(key)
                 tiles[key] = td
                 dataLru.put(key, td)
                 cntTileAlloc.incrementAndGet()
@@ -547,9 +552,84 @@ class RasterCoverageEngine {
         currentSpeedKmh?.let { v -> tile.ensureSpeed(); tile.speed!![idx] = v }
     }
 
-    private fun tileFromStore(st: StoreTile): TileData = TileData(
-        tileSize, st.count, st.sections, st.rate, st.speed, st.lastStrokeId, st.frontStamp, st.layerMask
-    ).also { it.rev = st.rev }
+    private fun tileFromStore(st: StoreTile): TileData {
+        val keyPacked = TileKey(st.tx, st.ty).pack()
+        accumulateRestoredMetrics(keyPacked, st.count, st.sections, st.rate)
+        return TileData(
+            tileSize, st.count, st.sections, st.rate, st.speed, st.lastStrokeId, st.frontStamp, st.layerMask
+        ).also { it.rev = st.rev }
+    }
+
+    private fun accumulateRestoredMetrics(
+        keyPacked: Long,
+        count: ByteArray,
+        sections: IntArray?,
+        rate: FloatArray?
+    ) {
+        if (!restoredTotals.add(keyPacked)) return
+
+        var once = 0L
+        var overlap = 0L
+        val sectionDelta = LongArray(sectionPx.size)
+        val rateSumDelta = DoubleArray(rateSumBySection.size)
+        val rateCountDelta = LongArray(rateCountBySection.size)
+        var rateSumAreaDelta = 0.0
+        var rateCountAreaDelta = 0L
+
+        val sectionsArr = sections
+        val rateArr = rate
+        val limit = count.size
+
+        for (i in 0 until limit) {
+            val cInt = count[i].toInt() and 0xFF
+            if (cInt == 0) continue
+
+            once++
+            overlap += (cInt - 1).toLong()
+
+            sectionsArr?.let { secArr ->
+                var bits = secArr[i]
+                if (bits != 0) {
+                    val cLong = cInt.toLong()
+                    var bitIdx = 0
+                    while (bits != 0 && bitIdx < sectionDelta.size) {
+                        if ((bits and 1) != 0) sectionDelta[bitIdx] += cLong
+                        bits = bits ushr 1
+                        bitIdx++
+                    }
+                }
+            }
+
+            rateArr?.let { rateValues ->
+                val rateValue = rateValues[i].toDouble()
+                val secMask = sectionsArr?.get(i) ?: 0
+                val secIdx = Integer.numberOfTrailingZeros(if (secMask != 0) secMask else 1)
+                if (secIdx in 0 until rateSumDelta.size) {
+                    rateSumDelta[secIdx] += rateValue
+                    rateCountDelta[secIdx]++
+                }
+                rateSumAreaDelta += rateValue
+                rateCountAreaDelta++
+            }
+        }
+
+        synchronized(totalsLock) {
+            totalOncePx += once
+            totalOverlapPx += overlap
+            for (i in sectionDelta.indices) {
+                val delta = sectionDelta[i]
+                if (delta != 0L) sectionPx[i] += delta
+            }
+            for (i in rateSumDelta.indices) {
+                if (rateCountDelta[i] != 0L || rateSumDelta[i] != 0.0) {
+                    rateSumBySection[i] += rateSumDelta[i]
+                    rateCountBySection[i] += rateCountDelta[i]
+                }
+            }
+            rateSumByArea += rateSumAreaDelta
+            rateCountByArea += rateCountAreaDelta
+        }
+    }
 
     private fun scheduleFlushAndMaybeEvict(keyPacked: Long, from: String) {
         val tile = tiles[keyPacked] ?: return
@@ -858,11 +938,76 @@ class RasterCoverageEngine {
         for (st in snap.tiles) {
             val td = TileData(tileSize, st.count, st.sections, st.rate, st.speed, st.lastStrokeId, st.frontStamp, st.layerMask).also { it.rev = st.rev }
             val key = TileKey(st.tx, st.ty).pack()
+            accumulateRestoredMetrics(key, st.count, st.sections, st.rate)
             tiles[key] = td
             cntTileAlloc.incrementAndGet()
         }
         invalidateTiles(); logMem()
     }
+
+    fun importTilesFromStore(tilesFromStore: Collection<StoreTile>) {
+        clearCoverage()
+        if (tilesFromStore.isEmpty()) {
+            invalidateTiles()
+            logMem()
+            return
+        }
+        for (st in tilesFromStore) {
+            val td = tileFromStore(st)
+            val key = TileKey(st.tx, st.ty).pack()
+            tiles[key] = td
+            dataLru.put(key, td)
+            cntTileAlloc.incrementAndGet()
+        }
+        recomputeMetricsFromTiles()
+        invalidateTiles()
+        logMem()
+    }
+
+    private fun recomputeMetricsFromTiles() {
+        totalOncePx = 0
+        totalOverlapPx = 0
+        sectionPx.fill(0)
+        rateSumBySection.fill(0.0)
+        rateCountBySection.fill(0)
+        rateSumByArea = 0.0
+        rateCountByArea = 0L
+
+        for (tile in tiles.values) {
+            val counts = tile.count
+            val sections = tile.sections
+            val rate = tile.rate
+            for (i in counts.indices) {
+                val c = counts[i].toInt() and 0xFF
+                if (c == 0) continue
+                totalOncePx++
+                if (c > 1) totalOverlapPx += (c - 1).toLong()
+
+                val mask = sections?.get(i) ?: 0
+                if (mask != 0) {
+                    var bits = mask
+                    while (bits != 0) {
+                        val lsb = bits and -bits
+                        val idx = Integer.numberOfTrailingZeros(lsb)
+                        if (idx in sectionPx.indices) sectionPx[idx]++
+                        bits = bits xor lsb
+                    }
+                }
+
+                val rateValue = rate?.get(i)
+                if (rateValue != null && !rateValue.isNaN()) {
+                    rateSumByArea += rateValue
+                    rateCountByArea++
+                    val secIdx = Integer.numberOfTrailingZeros(if (mask != 0) mask else 1)
+                    if (secIdx in rateSumBySection.indices) {
+                        rateSumBySection[secIdx] += rateValue
+                        rateCountBySection[secIdx]++
+                    }
+                }
+            }
+        }
+    }
+
 
     // ===== Utilitários =====
     private fun pack(tx: Int, ty: Int): Long = (tx.toLong() shl 32) xor (ty.toLong() and 0xffffffffL)

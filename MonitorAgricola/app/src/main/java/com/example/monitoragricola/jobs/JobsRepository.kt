@@ -2,7 +2,9 @@ package com.example.monitoragricola.jobs
 
 import com.example.monitoragricola.jobs.db.*
 import com.example.monitoragricola.raster.RasterCoverageEngine
+import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.store.RasterDatabase
+import com.example.monitoragricola.raster.store.RasterTileCoord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -46,11 +48,16 @@ class JobsRepository(
         pointDao.getPointsBetweenSeq(jobId, startSeq, endSeq)
     suspend fun maxSeq(jobId: Long): Int = pointDao.maxSeq(jobId) ?: 0
 
-    suspend fun loadRasterInto(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine): Boolean =
+    suspend fun loadRasterInto(jobId: Long, engine: RasterCoverageEngine): Boolean =
         withContext(Dispatchers.IO) {
             val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
+            val coords = rasterDb.rasterTileDao().listCoords(jobId)
+            if (coords.isNotEmpty()) {
+                val keys = coords.map { TileKey(it.tx, it.ty) }
+                store.preloadTiles(engine, keys)
+            }
             engine.attachStore(store)
-            rasterDb.rasterTileDao().countByJob(jobId) > 0
+            coords.isNotEmpty()
         }
     suspend fun saveRaster(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
         withContext(Dispatchers.IO) {
@@ -63,6 +70,9 @@ class JobsRepository(
             store.saveDirtyTilesAndClear(dirty)
             for ((_, tile) in dirty) tile.dirty = false
         }
+
+    suspend fun listRasterTileCoords(jobId: Long): List<RasterTileCoord> =
+        withContext(Dispatchers.IO) { rasterDb.rasterTileDao().listCoords(jobId) }
     suspend fun deleteRaster(jobId: Long) =
         withContext(Dispatchers.IO) { rasterDb.rasterTileDao().deleteByJob(jobId) }
 }

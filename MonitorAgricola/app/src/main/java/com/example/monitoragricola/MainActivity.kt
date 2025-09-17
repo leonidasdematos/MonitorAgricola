@@ -93,6 +93,9 @@ class MainActivity : AppCompatActivity() {
 
     private var mapReady = false
     private var lastViewport: BoundingBox? = null
+    private var viewportRestorePaused = false
+    private var startViewportUpdatesAfterRestore = false
+    private var rasterRestoreJob: Job? = null
 
     private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID, maxCacheTiles = 16) }
     private val noopTileStore = object : TileStore {
@@ -118,6 +121,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvJobState: TextView
     private lateinit var tvLinhaAlvo: TextView
     private lateinit var tvErroLateral: TextView
+    private lateinit var rasterLoadingOverlay: View
+
     private var speedEmaKmh: Double? = null   // filtro exponencial da velocidade
 
 
@@ -198,6 +203,7 @@ class MainActivity : AppCompatActivity() {
         tvImplemento = findViewById(R.id.tvImplemento)
         tvArea = findViewById(R.id.tvArea)
         tvSobreposicao = findViewById(R.id.tvSobreposicao)
+        rasterLoadingOverlay = findViewById(R.id.rasterLoadingOverlay)
         btnConfig = findViewById(R.id.btnConfigTop)
         btnLigar = findViewById(R.id.btnLigar)
         btnRotas = findViewById(R.id.btnRotas)
@@ -316,6 +322,7 @@ class MainActivity : AppCompatActivity() {
                     rasterEngine.invalidateTiles()
                     map.invalidate()
                 }
+                recomposeCoverageMetrics()
             } else {
                 // reaplica força e cobertura raster (pausado)
                 val selId = selectedJobId!!
@@ -771,6 +778,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startViewportUpdates() {
+        if (viewportRestorePaused) {
+            startViewportUpdatesAfterRestore = true
+            return
+        }
         viewportJob?.cancel()
         viewportJob = lifecycleScope.launch(Dispatchers.Default) {
             while (isActive) {
@@ -783,6 +794,7 @@ class MainActivity : AppCompatActivity() {
 
     /* ======================= Loop do mapa ======================= */
     private fun scheduleViewportUpdate() {
+        if (viewportRestorePaused) return
         val bb = map.boundingBox
         if (bb == lastViewport) return
         lastViewport = bb
@@ -791,6 +803,28 @@ class MainActivity : AppCompatActivity() {
             rasterEngine.updateViewport(bb)
             withContext(Dispatchers.Main) { map.postInvalidate() }
         }
+    }
+
+    private fun pauseViewportUpdatesForRestore() {
+        viewportRestorePaused = true
+        startViewportUpdatesAfterRestore = startViewportUpdatesAfterRestore || mapLoopStarted
+        if (viewportJob?.isActive == true) {
+            startViewportUpdatesAfterRestore = true
+        }
+        viewportJob?.cancel()
+        viewportJob = null
+    }
+
+    private fun resumeViewportUpdatesAfterRestore() {
+        if (!viewportRestorePaused) return
+        viewportRestorePaused = false
+        val shouldStart = startViewportUpdatesAfterRestore || mapLoopStarted
+        startViewportUpdatesAfterRestore = false
+        if (shouldStart) {
+            startViewportUpdates()
+        }
+        lastViewport = null
+        scheduleViewportUpdate()
     }
     private fun startMapUpdates() {
         startViewportUpdates()
@@ -887,9 +921,7 @@ class MainActivity : AppCompatActivity() {
                     ajustarAmostragemPorVelocidade()
 
                     // métricas vindas do raster
-                    val areas = rasterEngine.getAreas()
-                    tvArea.text = "Área: ${formatArea(areas.totalM2)}"
-                    tvSobreposicao.text = "Sobreposição: ${formatArea(areas.overlapM2)}"
+                    recomposeCoverageMetrics()
 
                     // guias de rota (inalterado)
                     val route = activeRoute
@@ -1082,15 +1114,31 @@ class MainActivity : AppCompatActivity() {
     /* ======================= Raster helpers ======================= */
 
     private fun restoreRasterOnMap(jobId: Long) {
+        rasterRestoreJob?.cancel()
+        rasterRestoreJob = null
+        pauseViewportUpdatesForRestore()
+        rasterLoadingOverlay.visibility = View.VISIBLE
         rasterEngine.attachStore(noopTileStore)
-        lifecycleScope.launch {
-            val ok = withContext(Dispatchers.IO) {
-                // Novo fluxo: injeta direto no engine; true se encontrou e carregou
-                jobManager.loadRasterInto(jobId, rasterEngine)
-            }
-
-            if (!ok) {
-                // Primeiro uso do job (ou não há snapshot salvo): ancora o engine
+        val store = RoomTileStore(app.rasterDb, jobId)
+        val job = lifecycleScope.launch {
+            try {
+                val coords = jobsRepo.listRasterTileCoords(jobId)
+                if (coords.isEmpty()) {
+                    val c = map.mapCenter
+                    rasterEngine.startJob(
+                        c.latitude,
+                        c.longitude,
+                        resolutionM = 0.10,
+                        tileSize = 256
+                    )
+                } else {
+                    val keys = coords.map { TileKey(it.tx, it.ty) }
+                    store.preloadTiles(rasterEngine, keys)
+                }
+            } catch (ex: CancellationException) {
+                throw ex
+            } catch (t: Throwable) {
+                Log.e(TAG_RASTER, "Falha ao restaurar raster do job $jobId", t)
                 val c = map.mapCenter
                 rasterEngine.startJob(
                     c.latitude,
@@ -1098,15 +1146,28 @@ class MainActivity : AppCompatActivity() {
                     resolutionM = 0.10,
                     tileSize = 256
                 )
+            } finally {
+                if (this != rasterRestoreJob) return@launch
+                rasterEngine.attachStore(store)
+                currentTileStore = store
+                rasterOverlay.invalidateTiles()
+                map.invalidate()
+                refreshAreaUiFromEngine()
+                rasterLoadingOverlay.visibility = View.GONE
+                resumeViewportUpdatesAfterRestore()
+                rasterRestoreJob = null
+                recomposeCoverageMetrics()
+
             }
-            val store = RoomTileStore(app.rasterDb, jobId)
-            rasterEngine.attachStore(store)
-            currentTileStore = store
-
-
-            rasterOverlay.invalidateTiles()
-            map.invalidate()
         }
+        rasterRestoreJob = job
+
+    }
+
+    private fun refreshAreaUiFromEngine() {
+        val areas = rasterEngine.getAreas()
+        tvArea.text = "Área: ${formatArea(areas.totalM2)}"
+        tvSobreposicao.text = "Sobreposição: ${formatArea(areas.overlapM2)}"
     }
 
 
@@ -1118,6 +1179,8 @@ class MainActivity : AppCompatActivity() {
         }
         app.clearFreeModeTileStore()
         map.invalidate()
+        recomposeCoverageMetrics()
+
     }
 
     /* ======================= UI helpers ======================= */
@@ -1164,6 +1227,13 @@ class MainActivity : AppCompatActivity() {
 
         return String.format("%.1f km/h", vKmhToShow)
     }
+
+    private fun recomposeCoverageMetrics() {
+        val areas = rasterEngine.getAreas()
+        tvArea.text = "Área: ${formatArea(areas.totalM2)}"
+        tvSobreposicao.text = "Sobreposição: ${formatArea(areas.overlapM2)}"
+    }
+
 
 
     private fun ajustarAmostragemPorVelocidade() {
@@ -1521,6 +1591,8 @@ class MainActivity : AppCompatActivity() {
             }
             rasterEngine.invalidateTiles()
             map.invalidate()
+            recomposeCoverageMetrics()
+
         }
     }
 

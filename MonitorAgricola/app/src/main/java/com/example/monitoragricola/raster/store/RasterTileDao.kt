@@ -9,6 +9,12 @@ data class RasterTileRow(
     val payload: ByteArray
 )
 
+data class RasterTileCoord(
+    val tx: Int,
+    val ty: Int
+)
+
+
 @Dao
 interface RasterTileDao {
 
@@ -21,6 +27,8 @@ interface RasterTileDao {
     @Query("SELECT COUNT(*) FROM raster_tiles WHERE jobId = :jobId")
     suspend fun countByJob(jobId: Long): Int
 
+    @Query("SELECT tx, ty FROM raster_tiles WHERE jobId = :jobId")
+    suspend fun listCoords(jobId: Long): List<RasterTileCoord>
 
     @Query("DELETE FROM raster_tiles WHERE jobId = :jobId")
     suspend fun deleteByJob(jobId: Long)
