@@ -591,17 +591,34 @@ class RasterCoverageEngine {
         dataLru.put(keyPacked, tile)
 
         if (!inHot && !inViz) {
-            tiles.remove(keyPacked)
+            maybeEvictColdTile(keyPacked, tile, reason = "schedule from=$from")
+        }
+    }
 
-            // >>> Corrigido: medir antes/depois para saber quantos bitmaps foram liberados
-            val before = bmpLru.size()
-            bmpLru.invalidate(keyPacked)
-            val freedBmp = (before - bmpLru.size()).coerceAtLeast(0)
+    private fun maybeEvictColdTile(keyPacked: Long, tile: TileData, reason: String) {
+        if (hotSet.contains(keyPacked) || vizSet.contains(keyPacked)) return
+        if (pendingFlush.contains(keyPacked)) {
+            Log.d(TAG_EVT, "DEFER EVICT key=$keyPacked reason=$reason pendingFlush")
+            return
+        }
+        if (tile.dirty) {
+            Log.d(TAG_EVT, "SKIP EVICT key=$keyPacked reason=$reason tile still dirty")
+            return
+        }
 
-            dataLru.remove(keyPacked)
+        val removed = tiles.remove(keyPacked)
+
+        // >>> Corrigido: medir antes/depois para saber quantos bitmaps foram liberados
+        val before = bmpLru.size()
+        bmpLru.invalidate(keyPacked)
+        val freedBmp = (before - bmpLru.size()).coerceAtLeast(0)
+        dataLru.remove(keyPacked)
+
+
+        if (removed != null) {
             cntTileFree.incrementAndGet()
             if (freedBmp > 0) cntBmpFree.addAndGet(freedBmp.toLong())
-            Log.d(TAG_EVT, "EVICT key=$keyPacked removed tile (freedBmp=$freedBmp)")
+            Log.d(TAG_EVT, "EVICT key=$keyPacked removed tile (freedBmp=$freedBmp) reason=$reason")
         }
     }
 
@@ -658,9 +675,11 @@ class RasterCoverageEngine {
                                 }
                                 val optAfter = optArrCount()
                                 for ((k, tile) in batch) {
+                                    val keyPacked = k.pack()
                                     tile.dirty = false
-                                    pendingFlush.remove(k.pack())
-                                    pendingSinceNs.remove(k.pack())
+                                    pendingFlush.remove(keyPacked)
+                                    pendingSinceNs.remove(keyPacked)
+                                    maybeEvictColdTile(keyPacked, tile, reason = "post-flush")
                                 }
                                 // >>> Corrigido: evite coerceAtLeast(Int) → use max(1L, ...)
                                 val dtMs: Long = max(1L, (System.nanoTime() - t0) / 1_000_000)

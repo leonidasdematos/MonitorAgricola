@@ -1578,4 +1578,42 @@ class MainActivity : AppCompatActivity() {
         refreshJobState()
     }
 
+    override fun onDestroy() {
+        followHandler.removeCallbacksAndMessages(null)
+        handler.removeCallbacksAndMessages(null)
+        viewportJob?.cancel()
+        viewportJob = null
+
+        simulatorProvider?.stop()
+        simulatorProvider = null
+        positionProvider?.stop()
+        positionProvider = null
+
+        if (::map.isInitialized) {
+            implementBar?.let {
+                map.overlays.remove(it)
+                implementBar = null
+            }
+            implementLink?.let {
+                map.overlays.remove(it)
+                implementLink = null
+            }
+            if (routePolylines.isNotEmpty()) {
+                routePolylines.forEach { map.overlays.remove(it) }
+                routePolylines.clear()
+            }
+            map.setOnTouchListener(null)
+            map.onDetach()
+        }
+
+        activeImplemento?.stop()
+        activeImplemento = null
+        routeRenderer = null
+        pendingA = null
+        pendingB = null
+
+        super.onDestroy()
+    }
+
+
 }
