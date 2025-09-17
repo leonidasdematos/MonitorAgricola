@@ -501,10 +501,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupMap() {
         map.setMultiTouchControls(true)
+        map.setTilesScaledToDpi(true)
+
+        val tileSource = map.tileProvider.tileSource
+        val maxZoom = (tileSource?.maximumZoomLevel ?: 22).toDouble()
 
         val startPoint = GeoPoint(-23.4000, -54.2000)
-        map.controller.setZoom(23.0)
-        map.controller.setCenter(startPoint)
+        map.controller.setZoom(min(22.0, maxZoom))
+        map.maxZoomLevel = maxZoom
 
         val rotationGestureOverlay = RotationGestureOverlay(map).apply { isEnabled = true }
         map.overlays.add(rotationGestureOverlay)
@@ -538,6 +542,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onZoom(event: ZoomEvent?): Boolean {
+                if (map.zoomLevelDouble > maxZoom) {
+                    map.controller.setZoom(maxZoom)
+                    return true
+                }
                 scheduleViewportUpdate()
                 return false
             }
@@ -582,6 +590,7 @@ class MainActivity : AppCompatActivity() {
             rasterOverlay.invalidateTiles()
             map.invalidate()
             true
+
         }
 
         btnImplementos.setOnClickListener {
