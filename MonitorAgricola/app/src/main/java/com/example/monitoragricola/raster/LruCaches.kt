@@ -34,7 +34,7 @@ internal class BitmapLRU(private val maxEntries: Int) {
         @Synchronized
         fun obtain(width: Int, height: Int): Pair<Bitmap, Boolean> {
             val bmp = recyclePool.pollFirst()
-            Log.d("BitmapLRU", "recycle pool size: ${recyclePool.size}")
+            //Log.d("BitmapLRU", "recycle pool size: ${recyclePool.size}")
 
             return if (bmp != null) {
                 bmp to true

@@ -56,6 +56,8 @@ import com.example.monitoragricola.FREE_MODE_JOB_ID
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.RasterSnapshot
+import org.osmdroid.tileprovider.tilesource.ITileSource
+import org.osmdroid.tileprovider.tilesource.XYTileSource
 
 private const val TAG_RASTER = "RASTER"
 
@@ -503,12 +505,16 @@ class MainActivity : AppCompatActivity() {
         map.setMultiTouchControls(true)
         map.setTilesScaledToDpi(true)
 
-        val tileSource = map.tileProvider.tileSource
-        val maxZoom = (tileSource?.maximumZoomLevel ?: 22).toDouble()
+        // qualquer tilesource só pra inicializar; não será usado
+        map.setUseDataConnection(false) // <- não baixa tiles
+        map.overlayManager.tilesOverlay.setLoadingBackgroundColor(Color.WHITE)
+        map.overlayManager.tilesOverlay.setLoadingLineColor(Color.WHITE) // remove grade
+
+
 
         val startPoint = GeoPoint(-23.4000, -54.2000)
-        map.controller.setZoom(min(22.0, maxZoom))
-        map.maxZoomLevel = maxZoom
+        map.controller.setZoom(22.0)
+        map.maxZoomLevel = 22.0
 
         val rotationGestureOverlay = RotationGestureOverlay(map).apply { isEnabled = true }
         map.overlays.add(rotationGestureOverlay)
@@ -542,8 +548,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onZoom(event: ZoomEvent?): Boolean {
-                if (map.zoomLevelDouble > maxZoom) {
-                    map.controller.setZoom(maxZoom)
+                if (map.zoomLevelDouble > 22.0) {
+                    map.controller.setZoom(22.0)
                     return true
                 }
                 scheduleViewportUpdate()
