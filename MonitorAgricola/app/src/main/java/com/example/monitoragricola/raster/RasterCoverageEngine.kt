@@ -14,6 +14,7 @@ import kotlinx.coroutines.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.IntBuffer
+import java.util.LinkedHashSet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
@@ -54,7 +55,7 @@ class RasterCoverageEngine {
     // ===== Config =====
     private var resolutionM: Double = 0.10
     private var tileSize: Int = 256
-    private var tileRadiusHot: Int = 4
+    private var tileRadiusHot: Int = 3
     var expandHotOnDemand: Boolean = false
 
     // ===== Estado global =====
@@ -266,13 +267,21 @@ class RasterCoverageEngine {
         val cTy = floor(py.toDouble() / tileSize).toInt()
 
         val newHot = HashSet<Long>((2 * tileRadiusHot + 1).let { it * it })
+        // Prefetch: chaves que acabaram de entrar ou estão pendentes + anel (r+1)
         val storeRef = store
+        val hotPrefetch = if (storeRef != null) LinkedHashSet<TileKey>() else null
         for (dy in -tileRadiusHot..tileRadiusHot) for (dx in -tileRadiusHot..tileRadiusHot) {
             val tx = cTx + dx; val ty = cTy + dy
             val key = TileKey(tx, ty).pack()
             newHot.add(key)
             val existing = tiles[key]
             val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
+
+            // Prefetch dos que entraram no HOT e ainda não estão prontos
+            if (hotPrefetch != null && shouldRetry) {
+                hotPrefetch.add(TileKey(tx, ty))
+            }
+
             if (shouldRetry) {
                 val st = storeRef?.loadTile(tx, ty)
                 if (st != null) {
@@ -293,6 +302,24 @@ class RasterCoverageEngine {
                     }
                     pendingStoreLoads.add(key)
                 }
+            }
+        }
+
+        // Prefetch do anel imediatamente fora do HOT (tileRadiusHot + 1)
+        if (hotPrefetch != null) {
+            val ring = tileRadiusHot + 1
+            if (ring > 0) {
+                for (dy in -ring..ring) for (dx in -ring..ring) {
+                    if (max(abs(dx), abs(dy)) != ring) continue
+                    val tx = cTx + dx; val ty = cTy + dy
+                    val k = pack(tx, ty)
+                    val missingOrPending = (tiles[k] == null) || pendingStoreLoads.contains(k)
+                    if (missingOrPending) hotPrefetch.add(TileKey(tx, ty))
+                }
+            }
+            if (hotPrefetch.isNotEmpty()) {
+                // off-main; este método já roda em Dispatchers.Default, mas garantimos
+                withContext(Dispatchers.Default) { storeRef?.prefetchTiles(hotPrefetch) }
             }
         }
 
@@ -323,11 +350,19 @@ class RasterCoverageEngine {
 
         val newViz = HashSet<Long>((tMaxX - tMinX + 1) * (tMaxY - tMinY + 1))
         val storeRef = store
+        // Prefetch: tudo que acabou de entrar em VIZ e ainda não está pronto
+        val vizPrefetch = if (storeRef != null) LinkedHashSet<TileKey>() else null
+
         for (ty in tMinY..tMaxY) for (tx in tMinX..tMaxX) {
             val key = TileKey(tx, ty).pack()
             newViz.add(key)
             val existing = tiles[key]
             val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
+
+            if (vizPrefetch != null && shouldRetry) {
+                vizPrefetch.add(TileKey(tx, ty))
+            }
+
             if (!shouldRetry) continue
 
             val st = storeRef?.loadTile(tx, ty)
@@ -340,7 +375,7 @@ class RasterCoverageEngine {
                     cntTileAlloc.incrementAndGet()
                 }
             } else {
-                if (existing == null) {
+                    if (existing == null) {
                     restoredTotals.add(key)
                     val td = TileData(tileSize)
                     tiles[key] = td
@@ -348,8 +383,11 @@ class RasterCoverageEngine {
                     cntTileAlloc.incrementAndGet()
                 }
                 pendingStoreLoads.add(key)
-            }
+                }
         }
+        if (vizPrefetch != null && vizPrefetch.isNotEmpty()) {
+            withContext(Dispatchers.Default) { storeRef?.prefetchTiles(vizPrefetch) }
+            }
 
         val oldViz = HashSet<Long>(vizSet)
         val removedFromViz = oldViz.apply { removeAll(newViz) }
