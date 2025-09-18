@@ -310,12 +310,16 @@ class RasterCoverageEngine {
             newViz.add(key)
             if (tiles[key] == null) {
                 val st = store?.loadTile(tx, ty)
-                if (st != null) {
-                    val td = tileFromStore(st)
-                    tiles[key] = td
-                    dataLru.put(key, td)
-                    cntTileAlloc.incrementAndGet()
+                val td = if (st != null) {
+                    tileFromStore(st)
+                } else {
+                    restoredTotals.add(key)
+                    TileData(tileSize)
                 }
+                tiles[key] = td
+                dataLru.put(key, td)
+                cntTileAlloc.incrementAndGet()
+
             }
         }
 
