@@ -1117,6 +1117,8 @@ class MainActivity : AppCompatActivity() {
         rasterLoadingOverlay.visibility = View.VISIBLE
         rasterEngine.attachStore(noopTileStore)
         val store = RoomTileStore(app.rasterDb, jobId)
+        var didPreloadTiles = false
+
         val job = lifecycleScope.launch {
             try {
                 val coords = jobsRepo.listRasterTileCoords(jobId)
@@ -1131,6 +1133,8 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     val keys = coords.map { TileKey(it.tx, it.ty) }
                     store.preloadTiles(rasterEngine, keys)
+                    didPreloadTiles = true
+
                 }
             } catch (ex: CancellationException) {
                 throw ex
@@ -1150,6 +1154,9 @@ class MainActivity : AppCompatActivity() {
                 currentTileStore = store
                 try {
                     withContext(Dispatchers.Default) {
+                        if (didPreloadTiles) {
+                            rasterEngine.finishStoreRestore()
+                        }
                         rasterEngine.updateViewport(viewport)
                     }
                 } catch (t: Throwable) {
