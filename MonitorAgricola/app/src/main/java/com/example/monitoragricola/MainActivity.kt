@@ -1148,8 +1148,17 @@ class MainActivity : AppCompatActivity() {
                 )
             } finally {
                 if (this != rasterRestoreJob) return@launch
+                val viewport = map.boundingBox
                 rasterEngine.attachStore(store)
                 currentTileStore = store
+                try {
+                    withContext(Dispatchers.Default) {
+                        rasterEngine.updateViewport(viewport)
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    Log.e(TAG_RASTER, "Falha ao recarregar tiles visíveis", t)
+                }
                 rasterOverlay.invalidateTiles()
                 map.invalidate()
                 refreshAreaUiFromEngine()

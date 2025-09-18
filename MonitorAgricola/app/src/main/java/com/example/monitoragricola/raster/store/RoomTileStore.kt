@@ -25,6 +25,11 @@ class RoomTileStore(
     private val jobId: Long,
     private val maxCacheTiles: Int = 16) : TileStore {
 
+    companion object {
+        private const val PRELOAD_CHUNK_SIZE = 16
+    }
+
+
     private val dao = db.rasterTileDao()
 
     // cache guarda apenas o payload comprimido para minimizar uso de heap
@@ -159,15 +164,30 @@ class RoomTileStore(
     }
 
     suspend fun preloadTiles(engine: RasterCoverageEngine, keys: Collection<TileKey>) {
-        if (keys.isEmpty()) {
-            withContext(Dispatchers.Default) { engine.importTilesFromStore(emptyList()) }
-            return
+        withContext(Dispatchers.Default) { engine.beginStoreRestore() }
+        if (keys.isEmpty()) return
+
+        val unique = LinkedHashSet(keys)
+        val chunk = ArrayList<TileKey>(PRELOAD_CHUNK_SIZE)
+        for (key in unique) {
+            chunk.add(key)
+            if (chunk.size >= PRELOAD_CHUNK_SIZE) {
+                streamChunkToEngine(engine, chunk)
+                chunk.clear()
+            }
         }
+        if (chunk.isNotEmpty()) {
+            streamChunkToEngine(engine, chunk)
+            chunk.clear()
+        }
+    }
+
+    private suspend fun streamChunkToEngine(engine: RasterCoverageEngine, chunk: List<TileKey>) {
+        if (chunk.isEmpty()) return
 
         val tiles = withContext(Dispatchers.IO) {
-            val unique = LinkedHashSet(keys)
-            val list = ArrayList<StoreStoreTile>(unique.size)
-            for (key in unique) {
+            val list = ArrayList<StoreStoreTile>(chunk.size)
+            for (key in chunk) {
                 val entity = dao.getTile(jobId, key.tx, key.ty) ?: continue
                 cache.put(key, entity.payload)
                 val decoded = TileCodec.decode(entity.payload).storeTile
@@ -176,9 +196,14 @@ class RoomTileStore(
             list
         }
 
+        if (tiles.isEmpty()) return
+
         withContext(Dispatchers.Default) {
-            engine.importTilesFromStore(tiles)
+            for (tile in tiles) {
+                engine.applyRestoredTileMetrics(tile)
+            }
         }
+        tiles.clear()
     }
 
 

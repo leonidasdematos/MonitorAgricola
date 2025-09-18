@@ -225,6 +225,10 @@ class RasterCoverageEngine {
         logMem()
     }
 
+    fun beginStoreRestore() {
+        clearCoverage()
+    }
+
     fun updateSpeed(speedKmh: Float?) { currentSpeedKmh = speedKmh }
 
     fun getAreas(): Areas {
@@ -553,11 +557,28 @@ class RasterCoverageEngine {
     }
 
     private fun tileFromStore(st: StoreTile): TileData {
-        val keyPacked = TileKey(st.tx, st.ty).pack()
-        accumulateRestoredMetrics(keyPacked, st.count, st.sections, st.rate)
+        return applyRestoredTileMetrics(st, keepTileInMemory = true)
+            ?: TileData(
+                tileSize, st.count, st.sections, st.rate, st.speed, st.lastStrokeId, st.frontStamp, st.layerMask
+            ).also { it.rev = st.rev }
+    }
+
+    fun applyRestoredTileMetrics(tile: StoreTile, keepTileInMemory: Boolean = false): TileData? {
+        val keyPacked = TileKey(tile.tx, tile.ty).pack()
+        accumulateRestoredMetrics(keyPacked, tile.count, tile.sections, tile.rate)
+        if (!keepTileInMemory) return null
+
+
         return TileData(
-            tileSize, st.count, st.sections, st.rate, st.speed, st.lastStrokeId, st.frontStamp, st.layerMask
-        ).also { it.rev = st.rev }
+            tileSize,
+            tile.count,
+            tile.sections,
+            tile.rate,
+            tile.speed,
+            tile.lastStrokeId,
+            tile.frontStamp,
+            tile.layerMask
+        ).also { it.rev = tile.rev }
     }
 
     private fun accumulateRestoredMetrics(
