@@ -1147,10 +1147,14 @@ class MainActivity : AppCompatActivity() {
                     tileSize = 256
                 )
             } finally {
-                if (this != rasterRestoreJob) return@launch
+                if (this != rasterRestoreJob) {
+                    rasterEngine.finishStoreRestore()
+                    return@launch
+                }
                 val viewport = map.boundingBox
                 rasterEngine.attachStore(store)
                 currentTileStore = store
+                rasterEngine.finishStoreRestore()
                 try {
                     withContext(Dispatchers.Default) {
                         rasterEngine.updateViewport(viewport)

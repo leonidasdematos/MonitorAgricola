@@ -74,6 +74,8 @@ class RasterCoverageEngine {
 
     // Storage (pluggable)
     @Volatile private var store: TileStore? = null
+    @Volatile private var restoringFromStore: Boolean = false
+
 
     // ===== Métricas/telemetria =====
     private var totalOncePx: Long = 0
@@ -226,8 +228,14 @@ class RasterCoverageEngine {
     }
 
     fun beginStoreRestore() {
+        restoringFromStore = true
         clearCoverage()
     }
+
+    fun finishStoreRestore() {
+        restoringFromStore = false
+    }
+
 
     fun updateSpeed(speedKmh: Float?) { currentSpeedKmh = speedKmh }
 
@@ -247,6 +255,7 @@ class RasterCoverageEngine {
 
     // ===== HOT / VIZ management =====
     suspend fun updateTractorHotCenter(lat: Double, lon: Double) {
+        if (restoringFromStore) return
         val proj = projection ?: return
         val p = proj.toLocalMeters(lat, lon)
         val px = floor(p.x / resolutionM).toInt()
@@ -282,6 +291,7 @@ class RasterCoverageEngine {
     }
 
     suspend fun updateViewport(bb: BoundingBox) {
+        if (restoringFromStore) return
         val proj = projection ?: return
         val p1 = proj.toLocalMeters(bb.latSouth, bb.lonWest)
         val p2 = proj.toLocalMeters(bb.latNorth, bb.lonEast)

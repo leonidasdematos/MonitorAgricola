@@ -52,11 +52,23 @@ class JobsRepository(
         withContext(Dispatchers.IO) {
             val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
             val coords = rasterDb.rasterTileDao().listCoords(jobId)
+            var restoreStarted = false
+
             if (coords.isNotEmpty()) {
                 val keys = coords.map { TileKey(it.tx, it.ty) }
-                store.preloadTiles(engine, keys)
+                restoreStarted = true
+                try {
+                    store.preloadTiles(engine, keys)
+                } catch (t: Throwable) {
+                    engine.attachStore(store)
+                    withContext(Dispatchers.Default) { engine.finishStoreRestore() }
+                    throw t
+                }
             }
             engine.attachStore(store)
+            if (restoreStarted) {
+                withContext(Dispatchers.Default) { engine.finishStoreRestore() }
+            }
             coords.isNotEmpty()
         }
     suspend fun saveRaster(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
