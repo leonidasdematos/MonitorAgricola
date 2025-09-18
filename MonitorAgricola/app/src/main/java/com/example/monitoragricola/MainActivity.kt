@@ -254,15 +254,12 @@ class MainActivity : AppCompatActivity() {
                     val snap = withContext(Dispatchers.IO) { freeTileStore.restore() }
                     if (snap != null) {
                         rasterEngine.importSnapshot(snap)
-                        job?.let { safeJob ->
-                            val store = RoomTileStore(app.rasterDb, safeJob.id)
+                        if (job != null) {
+                            val store = RoomTileStore(app.rasterDb, job.id)
                             rasterEngine.attachStore(store)
                             withContext(Dispatchers.IO) {
-                                jobManager.saveRaster(
-                                    safeJob.id,
-                                    store,
-                                    rasterEngine
-                                )
+                                jobManager.saveRaster(job.id, store, rasterEngine)
+
                             }
                             rasterEngine.attachStore(freeTileStore)
                         }
@@ -1147,14 +1144,10 @@ class MainActivity : AppCompatActivity() {
                     tileSize = 256
                 )
             } finally {
-                if (this != rasterRestoreJob) {
-                    rasterEngine.finishStoreRestore()
-                    return@launch
-                }
+                if (this != rasterRestoreJob) return@launch
                 val viewport = map.boundingBox
                 rasterEngine.attachStore(store)
                 currentTileStore = store
-                rasterEngine.finishStoreRestore()
                 try {
                     withContext(Dispatchers.Default) {
                         rasterEngine.updateViewport(viewport)

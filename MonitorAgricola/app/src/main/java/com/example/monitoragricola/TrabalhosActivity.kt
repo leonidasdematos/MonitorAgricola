@@ -52,12 +52,17 @@ class TrabalhosActivity : AppCompatActivity() {
     private lateinit var tvSelecionadoNomeEstado: TextView
     private lateinit var btnModoLivre: Button
 
+
+    private var selectedJobIdCache: Long? = null
     private var lastJobsSnapshot: List<JobEntity> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContentView(R.layout.activity_trabalhos)
+
+        refreshSelectedJobIdCache()
+
 
         list = findViewById(R.id.recyclerJobs)
         btnNovo = findViewById(R.id.btnNovoJob)
@@ -87,10 +92,10 @@ class TrabalhosActivity : AppCompatActivity() {
                         lifecycleScope.launch {
                             manager.finish(job.id, job.areaM2, job.overlapM2)
                             // Se este for o selecionado, limpamos a força e o selected_job_id
-                            val selId = ImplementosPrefs.getSelectedJobId(this@TrabalhosActivity)
+                            val selId = selectedJobIdCache ?: refreshSelectedJobIdCache()
                             if (selId == job.id) {
                                 ImplementoSelector.clearForce(this@TrabalhosActivity)
-                                ImplementosPrefs.clearSelectedJobId(this@TrabalhosActivity)
+                                clearSelectedJobSelection()
                                 renderSelecionadoCard(lastJobsSnapshot)
                             }
                         }
@@ -106,10 +111,10 @@ class TrabalhosActivity : AppCompatActivity() {
                         lifecycleScope.launch {
                             manager.delete(job.id)
                             // Se este for o selecionado, limpamos a força e o selected_job_id
-                            val selId = ImplementosPrefs.getSelectedJobId(this@TrabalhosActivity)
+                            val selId = selectedJobIdCache ?: refreshSelectedJobIdCache()
                             if (selId == job.id) {
                                 ImplementoSelector.clearForce(this@TrabalhosActivity)
-                                ImplementosPrefs.clearSelectedJobId(this@TrabalhosActivity)
+                                clearSelectedJobSelection()
                                 renderSelecionadoCard(lastJobsSnapshot)
                             }
                         }
@@ -156,6 +161,7 @@ class TrabalhosActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repo.observeAll().collectLatest { items ->
                 lastJobsSnapshot = items
+                refreshSelectedJobIdCache()
                 renderSelecionadoCard(items)
                 adapter.submit(itemsWithoutSelected(items))
             }
@@ -164,7 +170,7 @@ class TrabalhosActivity : AppCompatActivity() {
         // "Voltar ao modo livre" no card
         btnModoLivre.setOnClickListener {
             lifecycleScope.launch {
-                val selId = ImplementosPrefs.getSelectedJobId(this@TrabalhosActivity)
+                val selId = selectedJobIdCache ?: refreshSelectedJobIdCache()
                 val selJob = lastJobsSnapshot.firstOrNull { it.id == selId }
                 // Se estiver ativo, pause antes de sair para modo livre
                 if (selJob?.state == JobState.ACTIVE) {
@@ -172,7 +178,7 @@ class TrabalhosActivity : AppCompatActivity() {
                     manager.pause(selJob.id)
                 }
                 ImplementoSelector.clearForce(this@TrabalhosActivity)
-                ImplementosPrefs.clearSelectedJobId(this@TrabalhosActivity)
+                clearSelectedJobSelection()
                 Toast.makeText(this@TrabalhosActivity, "Voltando ao modo livre.", Toast.LENGTH_SHORT).show()
                 renderSelecionadoCard(lastJobsSnapshot)
                 adapter.submit(itemsWithoutSelected(lastJobsSnapshot))
@@ -221,6 +227,8 @@ class TrabalhosActivity : AppCompatActivity() {
 
                             val source = obterFonteAtual()
                             val id = manager.createAndStart(nome, snapshot, source)
+                            persistSelectedJobId(id)
+
 
                             // Força implemento para a Main retomar já com o implemento correto
                             ImplementoSelector.forceFromJob(this@TrabalhosActivity, snapshot)
@@ -258,7 +266,7 @@ class TrabalhosActivity : AppCompatActivity() {
             return
         }
 
-        val selId = ImplementosPrefs.getSelectedJobId(this)
+        val selId = selectedJobIdCache
         val selJob = items.firstOrNull { it.id == selId } ?: run {
             // Fallback: se não houver ID salvo, tente destacar o primeiro ACTIVE/PAUSED
             items.firstOrNull { it.state == JobState.ACTIVE || it.state == JobState.PAUSED }
@@ -282,11 +290,28 @@ class TrabalhosActivity : AppCompatActivity() {
     private fun itemsWithoutSelected(items: List<JobEntity>): List<JobEntity> {
         val forced = ImplementosPrefs.isForcedByJob(this)
         if (!forced) return items
-        val selId = ImplementosPrefs.getSelectedJobId(this)
+        val selId = selectedJobIdCache
         val idToRemove = selId ?: items.firstOrNull {
             it.state == JobState.ACTIVE || it.state == JobState.PAUSED
         }?.id
         return if (idToRemove != null) items.filter { it.id != idToRemove } else items
+    }
+
+
+    private fun persistSelectedJobId(jobId: Long) {
+        ImplementosPrefs.setSelectedJobId(this, jobId)
+        selectedJobIdCache = jobId
+    }
+
+    private fun clearSelectedJobSelection() {
+        ImplementosPrefs.clearSelectedJobId(this)
+        selectedJobIdCache = null
+    }
+
+    private fun refreshSelectedJobIdCache(): Long? {
+        val persisted = ImplementosPrefs.getSelectedJobId(this)
+        selectedJobIdCache = persisted
+        return persisted
     }
 }
 
