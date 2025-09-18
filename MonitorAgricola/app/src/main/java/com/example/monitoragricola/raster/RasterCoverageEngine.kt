@@ -812,108 +812,191 @@ class RasterCoverageEngine {
     // ===== Render (para overlay) =====
     @Volatile private var renderMode: HotVizMode = HotVizMode.COBERTURA
 
-    fun buildOrGetBitmapFor(tx: Int, ty: Int): Bitmap? {
-        val key = TileKey(tx, ty).pack()
+    fun buildOrGetBitmapFor(tx: Int, ty: Int): Bitmap? = buildOrGetBitmapFor(tx, ty, 1)
+
+    fun buildOrGetBitmapFor(tx: Int, ty: Int, stride: Int): Bitmap? {        val key = TileKey(tx, ty).pack()
         val tile = tiles[key] ?: return null
         val rev = tile.rev
-        bmpLru.get(key, rev)?.let { cntBmpReuse.incrementAndGet(); return it }
 
-        val (bmp, reusedFromPool) = BitmapLRU.obtain(tileSize, tileSize)
+        val normalizedStride = stride.coerceAtLeast(1)
+        val blockSize = normalizedStride.coerceAtMost(tileSize)
+        val outputSize = max(1, ceil(tileSize.toDouble() / blockSize).toInt())
+        val totalPixels = outputSize * outputSize
+
+        bmpLru.get(key, blockSize, rev)?.let {
+            cntBmpReuse.incrementAndGet()
+            return it
+        }
+
+        val (bmp, reusedFromPool) = BitmapLRU.obtain(outputSize, outputSize)
         if (reusedFromPool) {
             cntBmpReuse.incrementAndGet()
         } else {
             cntBmpAlloc.incrementAndGet()
         }
+
         when (renderMode) {
-            HotVizMode.COBERTURA -> fillCoverageColors(tile)
-            HotVizMode.SOBREPOSICAO -> fillOverlapColors(tile)
-            HotVizMode.TAXA -> fillRateColors(tile)
-            HotVizMode.VELOCIDADE -> fillSpeedColors(tile)
-            HotVizMode.SECOES -> fillSectionsColors(tile)
+            HotVizMode.COBERTURA -> fillCoverageColors(tile, blockSize)
+            HotVizMode.SOBREPOSICAO -> fillOverlapColors(tile, blockSize)
+            HotVizMode.TAXA -> fillRateColors(tile, blockSize, totalPixels)
+            HotVizMode.VELOCIDADE -> fillSpeedColors(tile, blockSize, totalPixels)
+            HotVizMode.SECOES -> fillSectionsColors(tile, blockSize, totalPixels)
         }
-        renderBuf.rewind()
+
+        renderBuf.position(0)
+        renderBuf.limit(totalPixels)
         bmp.copyPixelsFromBuffer(renderBuf)
-        bmpLru.put(key, rev, bmp)
-        //Log.d(TAG_MEM, "alloc=${cntBmpAlloc.get()} reuse=${cntBmpReuse.get()}")
+        renderBuf.clear()
+
+        bmpLru.put(key, blockSize, rev, bmp)
         return bmp
     }
 
-    private fun fillCoverageColors(tile: TileData) {
-        val n = tileSize * tileSize
-        for (i in 0 until n) {
-            val c = tile.count[i].toInt() and 0xFF
+    private fun fillCoverageColors(tile: TileData, blockSize: Int) {
+        val counts = tile.count
+        val size = tileSize
+        forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
+            var maxCount = 0
+            var y = y0
+            while (y < y1) {
+                var idx = y * size + x0
+                for (x in x0 until x1) {
+                    val c = counts[idx].toInt() and 0xFF
+                    if (c > maxCount) maxCount = c
+                    idx++
+                }
+                y++
+            }
             val v = when {
-                c == 0 -> 0
-                c == 1 -> 0x8022AA22.toInt()
+                maxCount == 0 -> 0
+                maxCount == 1 -> 0x8022AA22.toInt()
                 else -> 0xCCFF2222.toInt()
             }
-            renderBuf.put(i, v)
+            renderBuf.put(dstIndex, v)
         }
     }
 
-    private fun fillOverlapColors(tile: TileData) {
-        val n = tileSize * tileSize
-        for (i in 0 until n) {
-            val c = tile.count[i].toInt() and 0xFF
-            val v = if (c <= 1) 0 else 0xCCFF2222.toInt()
-            renderBuf.put(i, v)
-        }
-    }
-
-    private fun fillRateColors(tile: TileData) {
-        val r = tile.rate
-        val n = tileSize * tileSize
-        if (r == null) {
-            for (i in 0 until n) {
-                renderBuf.put(i, 0)
+    private fun fillOverlapColors(tile: TileData, blockSize: Int) {
+        val counts = tile.count
+        val size = tileSize
+        forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
+            var overlap = false
+            var y = y0
+            loop@ while (y < y1) {
+                var idx = y * size + x0
+                for (x in x0 until x1) {
+                    val c = counts[idx].toInt() and 0xFF
+                    if (c > 1) {
+                        overlap = true
+                        break@loop
+                    }
+                    idx++
+                }
+                y++
             }
-            return
-        }
-        for (i in 0 until n) {
-            val v = r[i]
-            val t = (v / 100f).coerceIn(0f, 1f)
-            val g = (t * 255).toInt(); val b = (255 - g)
-            renderBuf.put(i, (0xFF shl 24) or (0 shl 16) or (g shl 8) or (b))
+            val v = if (overlap) 0xCCFF2222.toInt() else 0
+            renderBuf.put(dstIndex, v)
         }
     }
 
-    private fun fillSpeedColors(tile: TileData) {
-        val s = tile.speed
-        val n = tileSize * tileSize
-        if (s == null) {
-            for (i in 0 until n) {
-                renderBuf.put(i, 0)
+    private fun fillRateColors(tile: TileData, blockSize: Int, outPixels: Int) {
+        val rates = tile.rate ?: return fillTransparent(outPixels)
+        val size = tileSize
+        forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
+            var sum = 0f
+            var count = 0
+            var y = y0
+            while (y < y1) {
+                var idx = y * size + x0
+                for (x in x0 until x1) {
+                    sum += rates[idx]
+                    count++
+                    idx++
+                }
+                y++
             }
-            return
-        }
-        for (i in 0 until n) {
-            val v = s[i]
-            val t = (v / 20f).coerceIn(0f, 1f)
-            val r = (t * 255).toInt(); val g = (255 - r)
-            renderBuf.put(i, (0xFF shl 24) or (r shl 16) or (g shl 8) or 0)
+            val avg = if (count > 0) sum / count else 0f
+            val t = (avg / 100f).coerceIn(0f, 1f)
+            val g = (t * 255).toInt()
+            val b = 255 - g
+            renderBuf.put(dstIndex, (0xFF shl 24) or (0 shl 16) or (g shl 8) or b)
         }
     }
 
-    private fun fillSectionsColors(tile: TileData) {
-        val sec = tile.sections
-        val n = tileSize * tileSize
-        if (sec == null) {
-            for (i in 0 until n) {
-                renderBuf.put(i, 0)
+    private fun fillSpeedColors(tile: TileData, blockSize: Int, outPixels: Int) {
+        val speeds = tile.speed ?: return fillTransparent(outPixels)
+        val size = tileSize
+        forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
+            var sum = 0f
+            var count = 0
+            var y = y0
+            while (y < y1) {
+                var idx = y * size + x0
+                for (x in x0 until x1) {
+                    sum += speeds[idx]
+                    count++
+                    idx++
+                }
+                y++
             }
-            return
+            val avg = if (count > 0) sum / count else 0f
+            val t = (avg / 20f).coerceIn(0f, 1f)
+            val r = (t * 255).toInt()
+            val g = 255 - r
+            renderBuf.put(dstIndex, (0xFF shl 24) or (r shl 16) or (g shl 8) or 0)
         }
-        for (i in 0 until n) {
-            val m = sec[i]
+    }
+
+    private fun fillSectionsColors(tile: TileData, blockSize: Int, outPixels: Int) {
+        val sections = tile.sections ?: return fillTransparent(outPixels)
+        val size = tileSize
+        forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
+            var mask = 0
+            var y = y0
+            while (y < y1) {
+                var idx = y * size + x0
+                for (x in x0 until x1) {
+                    mask = mask or sections[idx]
+                    idx++
+                }
+                y++
+            }
+
             val v = when {
-                m == 0 -> 0
-                m and 1 != 0 -> 0xFF0066FF.toInt()
-                m and 2 != 0 -> 0xFF00CC66.toInt()
-                m and 4 != 0 -> 0xFFFFBB00.toInt()
+                mask == 0 -> 0
+                mask and 1 != 0 -> 0xFF0066FF.toInt()
+                mask and 2 != 0 -> 0xFF00CC66.toInt()
+                mask and 4 != 0 -> 0xFFFFBB00.toInt()
                 else -> 0xFF999999.toInt()
             }
-            renderBuf.put(i, v)
+            renderBuf.put(dstIndex, v)
         }
+    }
+
+    private fun fillTransparent(outPixels: Int) {
+        for (i in 0 until outPixels) {
+            renderBuf.put(i, 0)
+        }
+    }
+
+    private inline fun forEachBlock(
+        blockSize: Int,
+        crossinline consumer: (x0: Int, x1: Int, y0: Int, y1: Int, dstIndex: Int) -> Unit
+    ) {
+        val step = blockSize.coerceAtLeast(1)
+        val size = tileSize
+        var dst = 0
+        var y = 0
+        while (y < size) {
+            val yEnd = min(y + step, size)
+            var x = 0
+            while (x < size) {
+                val xEnd = min(x + step, size)
+                consumer(x, xEnd, y, yEnd, dst)
+                dst++
+                x += step
+            }
+            y += step        }
     }
 
     // ===== Snapshots =====

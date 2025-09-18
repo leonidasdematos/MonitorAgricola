@@ -66,8 +66,6 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
         val tMaxY = floor((maxY - 1).toDouble() / tileSize).toInt()
 
         for (ty in tMinY..tMaxY) for (tx in tMinX..tMaxX) {
-            val bmp = engine.buildOrGetBitmapFor(tx, ty) ?: continue
-
             val x0m = tx * tileSize * res
             val y0m = ty * tileSize * res
             val x1m = x0m + tileSize * res
@@ -81,6 +79,11 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
 
             projection.toPixels(gp00, p00); projection.toPixels(gp10, p10)
             projection.toPixels(gp11, p11); projection.toPixels(gp01, p01)
+
+            val widthPx = hypot((p10.x - p00.x).toDouble(), (p10.y - p00.y).toDouble())
+            val heightPx = hypot((p01.x - p00.x).toDouble(), (p01.y - p00.y).toDouble())
+            val stride = computeStride(tileSize, widthPx, heightPx)
+            val bmp = engine.buildOrGetBitmapFor(tx, ty, stride) ?: continue
 
             srcPts[0] = 0f; srcPts[1] = 0f
             srcPts[2] = bmp.width.toFloat(); srcPts[3] = 0f
@@ -124,5 +127,16 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
         out.x = (lon - lon0) * mPerDegLon
         out.y = (lat - lat0) * mPerDegLat
         return out
+    }
+
+
+    private fun computeStride(tileSize: Int, widthPx: Double, heightPx: Double): Int {
+        val maxDim = max(widthPx, heightPx).coerceAtLeast(1.0)
+        val ratio = tileSize.toDouble() / maxDim
+        var stride = 1
+        while (stride < tileSize && ratio >= (stride * 2).toDouble()) {
+            stride *= 2
+        }
+        return stride
     }
 }
