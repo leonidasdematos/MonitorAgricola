@@ -151,7 +151,7 @@ class RoomTileStore(
     /**
      * Prefetch assíncrono (IO) e cache em memória.
      */
-    fun prefetchTiles(keys: Iterable<TileKey>) {
+    override fun prefetchTiles(keys: Iterable<TileKey>) {
         scope.launch {
             for (key in keys) {
                 if (cache.get(key) != null) continue

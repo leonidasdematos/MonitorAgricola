@@ -22,6 +22,9 @@ interface TileStore {
     fun loadTile(tx: Int, ty: Int): StoreTile?
     suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>)
 
+    /** Opcional: pré-carregar tiles no cache interno do store. */
+    fun prefetchTiles(keys: Iterable<TileKey>) {}
+
     /** Opcional: persistir snapshot completo do raster */
     fun snapshot(meta: RasterSnapshot) {}
 
