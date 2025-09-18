@@ -54,7 +54,7 @@ class RasterCoverageEngine {
     // ===== Config =====
     private var resolutionM: Double = 0.10
     private var tileSize: Int = 256
-    private var tileRadiusHot: Int = 3
+    private var tileRadiusHot: Int = 4
     var expandHotOnDemand: Boolean = false
 
     // ===== Estado global =====
@@ -67,6 +67,8 @@ class RasterCoverageEngine {
     private val tiles = ConcurrentHashMap<Long, TileData>()
     private val hotSet = ConcurrentHashMap.newKeySet<Long>()
     private val vizSet = ConcurrentHashMap.newKeySet<Long>()
+    private val pendingStoreLoads = ConcurrentHashMap.newKeySet<Long>()
+
 
     // LRU
     private val dataLru = TileDataLRU(80)
@@ -209,7 +211,7 @@ class RasterCoverageEngine {
 
     fun clearCoverage() {
         val removed = tiles.size
-        tiles.clear(); hotSet.clear(); vizSet.clear(); dataLru.clear()
+        tiles.clear(); hotSet.clear(); vizSet.clear(); dataLru.clear(); pendingStoreLoads.clear()
 
         // >>> Corrigido: medir antes/depois, sem depender do retorno
         val before = bmpLru.size()
@@ -264,18 +266,33 @@ class RasterCoverageEngine {
         val cTy = floor(py.toDouble() / tileSize).toInt()
 
         val newHot = HashSet<Long>((2 * tileRadiusHot + 1).let { it * it })
+        val storeRef = store
         for (dy in -tileRadiusHot..tileRadiusHot) for (dx in -tileRadiusHot..tileRadiusHot) {
             val tx = cTx + dx; val ty = cTy + dy
             val key = TileKey(tx, ty).pack()
             newHot.add(key)
             val existing = tiles[key]
-            if (existing == null) {
-                val st = store?.loadTile(tx, ty)
-                val td = if (st != null) tileFromStore(st) else TileData(tileSize)
-                if (st == null) restoredTotals.add(key)
-                tiles[key] = td
-                dataLru.put(key, td)
-                cntTileAlloc.incrementAndGet()
+            val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
+            if (shouldRetry) {
+                val st = storeRef?.loadTile(tx, ty)
+                if (st != null) {
+                    val wasPending = pendingStoreLoads.remove(key)
+                    val td = tileFromStore(st, forceMetrics = wasPending)
+                    tiles[key] = td
+                    dataLru.put(key, td)
+                    if (existing == null) {
+                        cntTileAlloc.incrementAndGet()
+                    }
+                } else {
+                    if (existing == null) {
+                        restoredTotals.add(key)
+                        val td = TileData(tileSize)
+                        tiles[key] = td
+                        dataLru.put(key, td)
+                        cntTileAlloc.incrementAndGet()
+                    }
+                    pendingStoreLoads.add(key)
+                }
             }
         }
 
@@ -305,21 +322,32 @@ class RasterCoverageEngine {
         val tMaxY = floor((maxY - 1).toDouble() / tileSize).toInt()
 
         val newViz = HashSet<Long>((tMaxX - tMinX + 1) * (tMaxY - tMinY + 1))
+        val storeRef = store
         for (ty in tMinY..tMaxY) for (tx in tMinX..tMaxX) {
             val key = TileKey(tx, ty).pack()
             newViz.add(key)
-            if (tiles[key] == null) {
-                val st = store?.loadTile(tx, ty)
-                val td = if (st != null) {
-                    tileFromStore(st)
-                } else {
-                    restoredTotals.add(key)
-                    TileData(tileSize)
-                }
+            val existing = tiles[key]
+            val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
+            if (!shouldRetry) continue
+
+            val st = storeRef?.loadTile(tx, ty)
+            if (st != null) {
+                val wasPending = pendingStoreLoads.remove(key)
+                val td = tileFromStore(st, forceMetrics = wasPending)
                 tiles[key] = td
                 dataLru.put(key, td)
-                cntTileAlloc.incrementAndGet()
-
+                if (existing == null) {
+                    cntTileAlloc.incrementAndGet()
+                }
+            } else {
+                if (existing == null) {
+                    restoredTotals.add(key)
+                    val td = TileData(tileSize)
+                    tiles[key] = td
+                    dataLru.put(key, td)
+                    cntTileAlloc.incrementAndGet()
+                }
+                pendingStoreLoads.add(key)
             }
         }
 
@@ -570,16 +598,16 @@ class RasterCoverageEngine {
         currentSpeedKmh?.let { v -> tile.ensureSpeed(); tile.speed!![idx] = v }
     }
 
-    private fun tileFromStore(st: StoreTile): TileData {
-        return applyRestoredTileMetrics(st, keepTileInMemory = true)
+    private fun tileFromStore(st: StoreTile, forceMetrics: Boolean = false): TileData {
+        return applyRestoredTileMetrics(st, keepTileInMemory = true, force = forceMetrics)
             ?: TileData(
                 tileSize, st.count, st.sections, st.rate, st.speed, st.lastStrokeId, st.frontStamp, st.layerMask
             ).also { it.rev = st.rev }
     }
 
-    fun applyRestoredTileMetrics(tile: StoreTile, keepTileInMemory: Boolean = false): TileData? {
+    fun applyRestoredTileMetrics(tile: StoreTile, keepTileInMemory: Boolean = false, force: Boolean = false): TileData? {
         val keyPacked = TileKey(tile.tx, tile.ty).pack()
-        accumulateRestoredMetrics(keyPacked, tile.count, tile.sections, tile.rate)
+        accumulateRestoredMetrics(keyPacked, tile.count, tile.sections, tile.rate, force)
         if (!keepTileInMemory) return null
 
 
@@ -599,10 +627,14 @@ class RasterCoverageEngine {
         keyPacked: Long,
         count: ByteArray,
         sections: IntArray?,
-        rate: FloatArray?
+        rate: FloatArray?,
+        force: Boolean = false
     ) {
-        if (!restoredTotals.add(keyPacked)) return
-
+        if (!force) {
+            if (!restoredTotals.add(keyPacked)) return
+        } else {
+            restoredTotals.add(keyPacked)
+        }
         var once = 0L
         var overlap = 0L
         val sectionDelta = LongArray(sectionPx.size)
@@ -728,6 +760,10 @@ class RasterCoverageEngine {
         bmpLru.invalidate(keyPacked)
         val freedBmp = (before - bmpLru.size()).coerceAtLeast(0)
         dataLru.remove(keyPacked)
+
+        if (pendingStoreLoads.remove(keyPacked)) {
+            restoredTotals.remove(keyPacked)
+        }
 
 
         if (removed != null) {
