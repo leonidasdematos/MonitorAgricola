@@ -164,7 +164,8 @@ class MainActivity : AppCompatActivity() {
     private val SIGNAL_LOSS_THRESHOLD_MS = 6_000L
 
     private var currentMinDistMeters: Double = 0.25
-    private var viewportJob: Job? = null
+    private var viewportLoopJob: Job? = null
+    private var viewportUpdateJob: Job? = null
     private var hotCenterJob: Job? = null
 
 
@@ -814,8 +815,8 @@ class MainActivity : AppCompatActivity() {
             startViewportUpdatesAfterRestore = true
             return
         }
-        val previousJob = viewportJob
-        viewportJob = lifecycleScope.launch(Dispatchers.Default) {
+        val previousJob = viewportLoopJob
+        viewportLoopJob = lifecycleScope.launch(Dispatchers.Default) {
             while (isActive) {
                 previousJob?.cancelAndJoin()
                 rasterEngine.updateViewport(map.boundingBox)
@@ -826,27 +827,31 @@ class MainActivity : AppCompatActivity() {
 
 
     /* ======================= Loop do mapa ======================= */
-    private fun scheduleViewportUpdate() {
-        if (viewportRestorePaused) return
+    private fun scheduleViewportUpdate(force: Boolean = false): Boolean {
+        if (viewportRestorePaused) return false
         val bb = map.boundingBox
-        if (bb == lastViewport) return
+        if (!force && bb == lastViewport) return false
         lastViewport = bb
-        val previousJob = viewportJob
-        viewportJob = lifecycleScope.launch(Dispatchers.Default) {
+        val previousJob = viewportUpdateJob
+        viewportUpdateJob = lifecycleScope.launch(Dispatchers.Default) {
             previousJob?.cancelAndJoin()
             rasterEngine.updateViewport(bb)
             withContext(Dispatchers.Main) { map.postInvalidate() }
         }
+        lastViewportUpdate = System.currentTimeMillis()
+        return true
     }
 
     private fun pauseViewportUpdatesForRestore() {
         viewportRestorePaused = true
         startViewportUpdatesAfterRestore = startViewportUpdatesAfterRestore || mapLoopStarted
-        if (viewportJob?.isActive == true) {
+        if (viewportLoopJob?.isActive == true) {
             startViewportUpdatesAfterRestore = true
         }
-        viewportJob?.cancel()
-        viewportJob = null
+        viewportLoopJob?.cancel()
+        viewportLoopJob = null
+        viewportUpdateJob?.cancel()
+        viewportUpdateJob = null
     }
 
     private fun resumeViewportUpdatesAfterRestore() {
@@ -928,13 +933,8 @@ class MainActivity : AppCompatActivity() {
                         scheduleViewportUpdate()
                     }
                     if (now - lastViewportUpdate > 500) {
-                        val bb = map.boundingBox
-                        val previousJob = viewportJob
-                        viewportJob = lifecycleScope.launch(Dispatchers.Default) {
-                            previousJob?.cancelAndJoin()
-                            rasterEngine.updateViewport(bb)
-                        }
-                        lastViewportUpdate = now
+                        scheduleViewportUpdate(force = true)
+
                     }
                     // Sempre atualiza o estado do implemento (barra, centro, articulação).
                     // O ImplementoBase só pinta raster se estiver rodando (running=true).
@@ -1771,8 +1771,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         followHandler.removeCallbacksAndMessages(null)
         handler.removeCallbacksAndMessages(null)
-        viewportJob?.cancel()
-        viewportJob = null
+        viewportLoopJob?.cancel()
+        viewportLoopJob = null
+        viewportUpdateJob?.cancel()
+        viewportUpdateJob = null
         hotCenterJob?.cancel()
         hotCenterJob = null
 
