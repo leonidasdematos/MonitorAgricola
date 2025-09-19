@@ -3,8 +3,11 @@ package com.example.monitoragricola.jobs
 import com.example.monitoragricola.jobs.db.*
 import com.example.monitoragricola.raster.RasterCoverageEngine
 import com.example.monitoragricola.raster.TileKey
+import com.example.monitoragricola.raster.store.JobRasterMetadata
 import com.example.monitoragricola.raster.store.RasterDatabase
 import com.example.monitoragricola.raster.store.RasterTileCoord
+import com.example.monitoragricola.raster.store.toDomain
+import com.example.monitoragricola.raster.store.toEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -15,6 +18,9 @@ class JobsRepository(
     private val eventDao: JobEventDao,
     private val rasterDb: RasterDatabase
 ) {
+
+    private val rasterTileDao = rasterDb.rasterTileDao()
+    private val rasterMetadataDao = rasterDb.jobRasterMetadataDao()
 
     fun observeAll(): Flow<List<JobEntity>> = jobDao.observeAll()
 
@@ -30,7 +36,8 @@ class JobsRepository(
         // apaga filhos antes
         pointDao.deleteByJob(jobId)
         eventDao.deleteByJob(jobId)
-        rasterDb.rasterTileDao().deleteByJob(jobId)
+        rasterTileDao.deleteByJob(jobId)
+        rasterMetadataDao.deleteByJob(jobId)
         // se tiver rotas/tabelas relacionadas, inclua aqui:
         // routeDao.deleteByJob(jobId)
         // routeLineDao.deleteByJob(jobId)
@@ -51,7 +58,18 @@ class JobsRepository(
     suspend fun loadRasterInto(jobId: Long, engine: RasterCoverageEngine): Boolean =
         withContext(Dispatchers.IO) {
             val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
-            val coords = rasterDb.rasterTileDao().listCoords(jobId)
+            val metadata = rasterMetadataDao.select(jobId)
+            if (metadata != null) {
+                withContext(Dispatchers.Default) {
+                    engine.startJob(
+                        metadata.originLat,
+                        metadata.originLon,
+                        metadata.resolutionM,
+                        metadata.tileSize
+                    )
+                }
+            }
+            val coords = rasterTileDao.listCoords(jobId)
             var restoreStarted = false
 
             if (coords.isNotEmpty()) {
@@ -81,10 +99,24 @@ class JobsRepository(
             }
             store.saveDirtyTilesAndClear(dirty)
             for ((_, tile) in dirty) tile.dirty = false
+
+            val metadata = JobRasterMetadata(
+                jobId = jobId,
+                originLat = engine.currentOriginLat(),
+                originLon = engine.currentOriginLon(),
+                resolutionM = engine.currentResolutionM(),
+                tileSize = engine.currentTileSize()
+            )
+            rasterMetadataDao.upsert(metadata.toEntity())
         }
 
     suspend fun listRasterTileCoords(jobId: Long): List<RasterTileCoord> =
-        withContext(Dispatchers.IO) { rasterDb.rasterTileDao().listCoords(jobId) }
+        withContext(Dispatchers.IO) { rasterTileDao.listCoords(jobId) }
     suspend fun deleteRaster(jobId: Long) =
-        withContext(Dispatchers.IO) { rasterDb.rasterTileDao().deleteByJob(jobId) }
-}
+        withContext(Dispatchers.IO) {
+            rasterTileDao.deleteByJob(jobId)
+            rasterMetadataDao.deleteByJob(jobId)
+        }
+
+    suspend fun getRasterMetadata(jobId: Long): JobRasterMetadata? =
+        withContext(Dispatchers.IO) { rasterMetadataDao.select(jobId)?.toDomain() }}

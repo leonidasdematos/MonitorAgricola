@@ -56,6 +56,7 @@ import com.example.monitoragricola.FREE_MODE_JOB_ID
 import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.RasterSnapshot
+import com.example.monitoragricola.raster.store.JobRasterMetadata
 import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 
@@ -1117,12 +1118,60 @@ class MainActivity : AppCompatActivity() {
         rasterLoadingOverlay.visibility = View.VISIBLE
         rasterEngine.attachStore(noopTileStore)
         val store = RoomTileStore(app.rasterDb, jobId)
-        var didPreloadTiles = false
+        var restoreModeStarted = false
 
         val job = lifecycleScope.launch {
+            var metadata: JobRasterMetadata? = null
             try {
+                metadata = jobsRepo.getRasterMetadata(jobId)
+                metadata?.let {
+                    rasterEngine.startJob(
+                        it.originLat,
+                        it.originLon,
+                        resolutionM = it.resolutionM,
+                        tileSize = it.tileSize
+                    )
+                }
+
                 val coords = jobsRepo.listRasterTileCoords(jobId)
                 if (coords.isEmpty()) {
+                    if (metadata == null) {
+                        val c = map.mapCenter
+                        rasterEngine.startJob(
+                            c.latitude,
+                            c.longitude,
+                            resolutionM = 0.10,
+                            tileSize = 256
+                        )
+                    }
+                } else {
+                    if (metadata == null) {
+                        val c = map.mapCenter
+                        rasterEngine.startJob(
+                            c.latitude,
+                            c.longitude,
+                            resolutionM = 0.10,
+                            tileSize = 256
+                        )
+                    }
+                    val keys = coords.map { TileKey(it.tx, it.ty) }
+                    restoreModeStarted = true
+                    store.preloadTiles(rasterEngine, keys)
+
+                }
+            } catch (ex: CancellationException) {
+                throw ex
+            } catch (t: Throwable) {
+                Log.e(TAG_RASTER, "Falha ao restaurar raster do job $jobId", t)
+                val meta = metadata
+                if (meta != null) {
+                    rasterEngine.startJob(
+                        meta.originLat,
+                        meta.originLon,
+                        resolutionM = meta.resolutionM,
+                        tileSize = meta.tileSize
+                    )
+                } else {
                     val c = map.mapCenter
                     rasterEngine.startJob(
                         c.latitude,
@@ -1130,33 +1179,19 @@ class MainActivity : AppCompatActivity() {
                         resolutionM = 0.10,
                         tileSize = 256
                     )
-                } else {
-                    val keys = coords.map { TileKey(it.tx, it.ty) }
-                    store.preloadTiles(rasterEngine, keys)
-                    didPreloadTiles = true
-
                 }
-            } catch (ex: CancellationException) {
-                throw ex
-            } catch (t: Throwable) {
-                Log.e(TAG_RASTER, "Falha ao restaurar raster do job $jobId", t)
-                val c = map.mapCenter
-                rasterEngine.startJob(
-                    c.latitude,
-                    c.longitude,
-                    resolutionM = 0.10,
-                    tileSize = 256
-                )
             } finally {
                 if (this != rasterRestoreJob) return@launch
                 val viewport = map.boundingBox
                 rasterEngine.attachStore(store)
                 currentTileStore = store
                 try {
-                    withContext(Dispatchers.Default) {
-                        if (didPreloadTiles) {
+                    if (restoreModeStarted) {
+                        withContext(Dispatchers.Default) {
                             rasterEngine.finishStoreRestore()
                         }
+                    }
+                    withContext(Dispatchers.Default) {
                         rasterEngine.updateViewport(viewport)
                     }
                 } catch (t: Throwable) {

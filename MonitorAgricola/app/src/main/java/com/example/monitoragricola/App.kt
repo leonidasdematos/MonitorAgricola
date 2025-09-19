@@ -36,6 +36,7 @@ class App : Application() {
     fun clearFreeModeTileStore() {
         applicationScope.launch {
             rasterDb.rasterTileDao().deleteByJob(FREE_MODE_JOB_ID)
+            rasterDb.jobRasterMetadataDao().deleteByJob(FREE_MODE_JOB_ID)
         }
     }
 
