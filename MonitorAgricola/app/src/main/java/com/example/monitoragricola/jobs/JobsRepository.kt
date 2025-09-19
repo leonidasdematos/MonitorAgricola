@@ -58,18 +58,17 @@ class JobsRepository(
     suspend fun loadRasterInto(jobId: Long, engine: RasterCoverageEngine): Boolean =
         withContext(Dispatchers.IO) {
             val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
-            val metadata = rasterMetadataDao.select(jobId)
-            if (metadata != null) {
-                withContext(Dispatchers.Default) {
-                    engine.startJob(
-                        metadata.originLat,
-                        metadata.originLon,
-                        metadata.resolutionM,
-                        metadata.tileSize
-                    )
-                }
-            }
             val coords = rasterTileDao.listCoords(jobId)
+            val persistedMetadata = rasterMetadataDao.select(jobId)?.toDomain()
+            val effectiveMetadata = persistedMetadata ?: deriveFallbackRasterMetadata(jobId, engine, coords)
+            withContext(Dispatchers.Default) {
+                engine.startJob(
+                    effectiveMetadata.originLat,
+                    effectiveMetadata.originLon,
+                    effectiveMetadata.resolutionM,
+                    effectiveMetadata.tileSize
+                )
+            }
             var restoreStarted = false
 
             if (coords.isNotEmpty()) {
@@ -89,6 +88,30 @@ class JobsRepository(
             }
             coords.isNotEmpty()
         }
+
+
+    /**
+     * When the metadata row is missing we still need to boot the engine before streaming tiles.
+     * Reuse the engine's current origin/resolution as a conservative fallback and, when
+     * possible, read the tile size from the first persisted tile to keep grid alignment.
+     */
+    private suspend fun deriveFallbackRasterMetadata(
+        jobId: Long,
+        engine: RasterCoverageEngine,
+        coords: List<RasterTileCoord>
+    ): JobRasterMetadata {
+        val inferredTileSize = coords.firstOrNull()?.let { first ->
+            rasterTileDao.getTile(jobId, first.tx, first.ty)?.tileSize
+        }
+
+        return JobRasterMetadata(
+            jobId = jobId,
+            originLat = engine.currentOriginLat(),
+            originLon = engine.currentOriginLon(),
+            resolutionM = engine.currentResolutionM(),
+            tileSize = inferredTileSize ?: engine.currentTileSize()
+        )
+    }
     suspend fun saveRaster(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
         withContext(Dispatchers.IO) {
             val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
