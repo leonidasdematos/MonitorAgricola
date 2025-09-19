@@ -466,16 +466,35 @@ class RasterCoverageEngine {
             }
         }
 
-        val oldHot = HashSet<Long>(hotSet)
-        val removedFromHot = oldHot.apply { removeAll(newHot) }
-
-        hotSet.clear(); hotSet.addAll(newHot)
-
-        coroutineContext.ensureActive()
-        for (key in removedFromHot) {
-            coroutineContext.ensureActive()
-            scheduleFlushAndMaybeEvict(key, from = "HOT")
+        val previousHot = HashSet<Long>(hotSet)
+        val removedFromHot = HashSet<Long>()
+        for (existing in previousHot) {
+            if (!newHot.contains(existing)) {
+                removedFromHot.add(existing)
+            }
         }
+
+        val addedToHot = ArrayList<Long>()
+        for (key in newHot) {
+            if (!previousHot.contains(key)) {
+                addedToHot.add(key)
+            }
+        }
+        if (addedToHot.isNotEmpty()) {
+            hotSet.addAll(addedToHot)
+        }
+
+        if (removedFromHot.isNotEmpty()) {
+            coroutineContext.ensureActive()
+            for (key in removedFromHot) {
+                coroutineContext.ensureActive()
+                hotSet.remove(key)
+            }
+            coroutineContext.ensureActive()
+            for (key in removedFromHot) {
+                coroutineContext.ensureActive()
+                scheduleFlushAndMaybeEvict(key, from = "HOT")
+            }        }
         logMem()
         startFlushLoopIfNeeded()
     }
