@@ -1224,16 +1224,21 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
             } finally {
+                if (restoreModeStarted) {
+                    try {
+                        withContext(Dispatchers.Default + NonCancellable) {
+                            rasterEngine.finishStoreRestore()
+                        }
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        Log.e(TAG_RASTER, "Falha ao finalizar restauração do raster do job $jobId", t)
+                    }
+                }
                 if (this != rasterRestoreJob) return@launch
                 val viewport = map.boundingBox
                 rasterEngine.attachStore(store)
                 currentTileStore = store
                 try {
-                    if (restoreModeStarted) {
-                        withContext(Dispatchers.Default) {
-                            rasterEngine.finishStoreRestore()
-                        }
-                    }
                     withContext(Dispatchers.Default) {
                         rasterEngine.updateViewport(viewport)
                     }
