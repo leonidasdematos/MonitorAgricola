@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Monitor Agrícola</string>
+    <string name="taxa_semente">Taxa Semente: %1$d</string>
+    <string name="taxa_adubo">Taxa Adubo: %1$d</string>
+    <string name="trator">Trator</string>
+    <string name="linhas_hint">Número de linhas</string>
+    <string name="espacamento_hint">Espaçamento (m)</string>
+    <string name="start">Iniciar</string>
+    <string name="stop">Parar</string>
+</resources>
