@@ -17,6 +17,107 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 
+private class LongArraySet(initialCapacity: Int = 16) {
+    private var keys = LongArray(nextPowerOfTwo(initialCapacity.coerceAtLeast(1)))
+    private var states = ByteArray(keys.size)
+    private var _size = 0
+    private var threshold = computeThreshold(keys.size)
+
+    val size: Int
+        get() = _size
+
+    fun isEmpty(): Boolean = _size == 0
+
+    fun add(value: Long) {
+        if (_size >= threshold) {
+            rehash(keys.size shl 1)
+        }
+        insert(value)
+    }
+
+    fun clear() {
+        if (_size == 0) return
+        states.fill(0)
+        _size = 0
+    }
+
+    inline fun forEach(action: (Long) -> Unit) {
+        for (index in keys.indices) {
+            if (states[index].toInt() == 1) {
+                action(keys[index])
+            }
+        }
+    }
+
+    private fun insert(value: Long) {
+        var idx = indexFor(value, keys.size)
+        val mask = keys.size - 1
+        while (true) {
+            val state = states[idx].toInt()
+            if (state == 0) {
+                keys[idx] = value
+                states[idx] = 1
+                _size++
+                return
+            }
+            if (state == 1 && keys[idx] == value) {
+                return
+            }
+            idx = (idx + 1) and mask
+        }
+    }
+
+    private fun rehash(newCapacity: Int) {
+        val oldKeys = keys
+        val oldStates = states
+        keys = LongArray(newCapacity)
+        states = ByteArray(newCapacity)
+        _size = 0
+        threshold = computeThreshold(newCapacity)
+        val mask = newCapacity - 1
+        for (i in oldKeys.indices) {
+            if (oldStates[i].toInt() == 1) {
+                var idx = indexFor(oldKeys[i], newCapacity)
+                while (states[idx].toInt() == 1) {
+                    idx = (idx + 1) and mask
+                }
+                keys[idx] = oldKeys[i]
+                states[idx] = 1
+                _size++
+            }
+        }
+    }
+
+    private fun computeThreshold(capacity: Int): Int {
+        return max(1, (capacity * 0.75f).toInt())
+    }
+
+    private fun indexFor(value: Long, capacity: Int): Int {
+        val mask = capacity - 1
+        return mix(value) and mask
+    }
+
+    private fun mix(value: Long): Int {
+        var v = value
+        v = v xor (v ushr 33)
+        v *= -0xae502812aa7333L
+        v = v xor (v ushr 33)
+        v *= -0x3b314601e57a13adL
+        v = v xor (v ushr 33)
+        return v.toInt()
+    }
+
+    companion object {
+        private fun nextPowerOfTwo(value: Int): Int {
+            var v = 1
+            while (v < value) {
+                v = v shl 1
+            }
+            return v
+        }
+    }
+}
+
 /**
  * Engine HOT ∪ VIZ (memória efetiva = tiles próximos do trator + tiles visíveis no viewport).
  *
@@ -134,6 +235,8 @@ class RasterCoverageEngine {
     private var lastSavedLogged = 0L
     private var lastEnqLogged = 0L
 
+    private val dirtyTileKeys = LongArraySet(128)
+
 
     private fun resetRenderBufferForTileSize(newTileSize: Int) {
         val required = newTileSize * newTileSize
@@ -222,6 +325,22 @@ class RasterCoverageEngine {
         val freed = (before - bmpLru.size()).coerceAtLeast(0)
         cntBmpFree.addAndGet(freed.toLong())
     }
+
+    private fun markTileDirty(key: Long) {
+        dirtyTileKeys.add(key)
+    }
+
+    private fun invalidateDirtyTileBitmaps() {
+        if (dirtyTileKeys.isEmpty()) return
+        val before = bmpLru.size()
+        dirtyTileKeys.forEach { key -> bmpLru.invalidate(key) }
+        val freed = (before - bmpLru.size()).coerceAtLeast(0)
+        if (freed > 0) {
+            cntBmpFree.addAndGet(freed.toLong())
+        }
+        dirtyTileKeys.clear()
+    }
+
 
     fun clearCoverage() {
         val removed = tiles.size
@@ -449,6 +568,7 @@ class RasterCoverageEngine {
         activeSectionsMask: Int,
         rateValue: Float?
     ) {
+        dirtyTileKeys.clear()
         val proj = projection ?: return
         if (last == null || implementWidthMeters <= 0.01) return
 
@@ -468,7 +588,7 @@ class RasterCoverageEngine {
         lastUx = ux; lastUy = uy; hasLastDir = true
 
         val minAdvance = 0.20 * resolutionM
-        if (dist < minAdvance || !running) { invalidateTiles(); return }
+        if (dist < minAdvance || !running) { invalidateDirtyTileBitmaps(); return }
 
         strokeId = (strokeId + 1) and 0xFFFF
 
@@ -498,7 +618,7 @@ class RasterCoverageEngine {
         }
 
         markFrontMask(p1.x, p1.y, ux, uy, implementWidthMeters, computeFrontLength(implementWidthMeters))
-        invalidateTiles()
+        invalidateDirtyTileBitmaps()
     }
 
     private fun drawSweptStrip(
@@ -571,7 +691,9 @@ class RasterCoverageEngine {
 
             val ix = px - tx * tileSize; val iy = py - ty * tileSize
             val idx = iy * tileSize + ix
-            writePixel(tile, idx, sectionsMask, rateValue)
+            if (writePixel(tile, idx, sectionsMask, rateValue)) {
+                markTileDirty(key)
+            }
         }
     }
 
@@ -620,6 +742,7 @@ class RasterCoverageEngine {
             val fs = ensureFrontStamp(tile)
             fs[idx] = curStamp
             tile.dirty = true; tile.rev += 1
+            markTileDirty(key)
         }
     }
 
@@ -629,11 +752,11 @@ class RasterCoverageEngine {
         return fs
     }
 
-    private fun writePixel(tile: TileData, idx: Int, sectionsMask: Int, rateValue: Float?) {
+    private fun writePixel(tile: TileData, idx: Int, sectionsMask: Int, rateValue: Float?): Boolean {
         tile.ensureLastStrokeId()
         val ls = tile.lastStrokeId!!
         val lastStroke = ls[idx]
-        if (lastStroke.toInt() == strokeId) return
+        if (lastStroke.toInt() == strokeId) return false
         ls[idx] = strokeId.toShort()
 
         val prev = tile.count[idx].toInt() and 0xFF
@@ -655,7 +778,7 @@ class RasterCoverageEngine {
             if (sectionsMask != 0) { tile.ensureSections(); tile.sections!![idx] = tile.sections!![idx] or sectionsMask }
             if (rateValue != null) { tile.ensureRate(); tile.rate!![idx] = rateValue }
             currentSpeedKmh?.let { v -> tile.ensureSpeed(); tile.speed!![idx] = v }
-            return
+            return false
         }
 
         tile.count[idx] = now.toByte(); tile.dirty = true; tile.rev += 1
@@ -672,6 +795,7 @@ class RasterCoverageEngine {
             rateSumByArea += rateValue; rateCountByArea++
         }
         currentSpeedKmh?.let { v -> tile.ensureSpeed(); tile.speed!![idx] = v }
+        return true
     }
 
     private fun tileFromStore(st: StoreTile, forceMetrics: Boolean = false): TileData {
