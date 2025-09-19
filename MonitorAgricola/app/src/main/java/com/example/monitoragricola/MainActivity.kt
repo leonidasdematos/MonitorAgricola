@@ -474,8 +474,10 @@ class MainActivity : AppCompatActivity() {
         if (selId != null) {
             val store = currentTileStore
             if (store != null) {
-                lifecycleScope.launch(Dispatchers.IO) {
-                    runCatching { jobManager.saveRaster(selId, store, rasterEngine) }
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO + NonCancellable) {
+                        runCatching { jobManager.saveRaster(selId, store, rasterEngine) }
+                    }
                 }
             }
         } else {
