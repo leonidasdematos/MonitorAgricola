@@ -11,6 +11,7 @@ import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import kotlin.math.*
 import kotlinx.coroutines.*
+import kotlin.coroutines.coroutineContext
 import java.util.LinkedHashSet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -52,7 +53,7 @@ class RasterCoverageEngine {
     // ===== Config =====
     private var resolutionM: Double = 0.10
     private var tileSize: Int = 256
-    private var tileRadiusHot: Int = 3
+    private var tileRadiusHot: Int = 5
     var expandHotOnDemand: Boolean = false
 
     // ===== Estado global =====
@@ -271,7 +272,9 @@ class RasterCoverageEngine {
     // ===== HOT / VIZ management =====
     suspend fun updateTractorHotCenter(lat: Double, lon: Double) {
         if (restoringFromStore) return
+        coroutineContext.ensureActive()
         val proj = projection ?: return
+        coroutineContext.ensureActive()
         val p = proj.toLocalMeters(lat, lon)
         val px = floor(p.x / resolutionM).toInt()
         val py = floor(p.y / resolutionM).toInt()
@@ -282,19 +285,119 @@ class RasterCoverageEngine {
         // Prefetch: chaves que acabaram de entrar ou estão pendentes + anel (r+1)
         val storeRef = store
         val hotPrefetch = if (storeRef != null) LinkedHashSet<TileKey>() else null
-        for (dy in -tileRadiusHot..tileRadiusHot) for (dx in -tileRadiusHot..tileRadiusHot) {
-            val tx = cTx + dx; val ty = cTy + dy
-            val key = TileKey(tx, ty).pack()
-            newHot.add(key)
-            val existing = tiles[key]
-            val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
+        for (dy in -tileRadiusHot..tileRadiusHot) {
+            coroutineContext.ensureActive()
+            for (dx in -tileRadiusHot..tileRadiusHot) {
+                coroutineContext.ensureActive()
+                val tx = cTx + dx; val ty = cTy + dy
+                val key = TileKey(tx, ty).pack()
+                newHot.add(key)
+                val existing = tiles[key]
+                val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
 
-            // Prefetch dos que entraram no HOT e ainda não estão prontos
-            if (hotPrefetch != null && shouldRetry) {
-                hotPrefetch.add(TileKey(tx, ty))
+                // Prefetch dos que entraram no HOT e ainda não estão prontos
+                if (hotPrefetch != null && shouldRetry) {
+                    hotPrefetch.add(TileKey(tx, ty))
+                }
+
+                if (shouldRetry) {
+                    val st = storeRef?.loadTile(tx, ty)
+                    if (st != null) {
+                        val wasPending = pendingStoreLoads.remove(key)
+                        val td = tileFromStore(st, forceMetrics = wasPending)
+                        tiles[key] = td
+                        dataLru.put(key, td)
+                        if (existing == null) {
+                            cntTileAlloc.incrementAndGet()
+                        }
+                    } else {
+                        if (existing == null) {
+                            restoredTotals.add(key)
+                            val td = TileData(tileSize)
+                            tiles[key] = td
+                            dataLru.put(key, td)
+                            cntTileAlloc.incrementAndGet()
+                        }
+                        pendingStoreLoads.add(key)
+                    }
+                }
             }
+        }
 
-            if (shouldRetry) {
+        // Prefetch do anel imediatamente fora do HOT (tileRadiusHot + 1)
+        if (hotPrefetch != null) {
+            val ring = tileRadiusHot + 1
+            if (ring > 0) {
+                for (dy in -ring..ring) {
+                    coroutineContext.ensureActive()
+                    for (dx in -ring..ring) {
+                        coroutineContext.ensureActive()
+                        if (max(abs(dx), abs(dy)) != ring) continue
+                        val tx = cTx + dx; val ty = cTy + dy
+                        val k = pack(tx, ty)
+                        val missingOrPending = (tiles[k] == null) || pendingStoreLoads.contains(k)
+                        if (missingOrPending) hotPrefetch.add(TileKey(tx, ty))
+                    }
+                }
+            }
+            coroutineContext.ensureActive()
+            if (hotPrefetch.isNotEmpty()) {
+                // off-main; este método já roda em Dispatchers.Default, mas garantimos
+                withContext(Dispatchers.Default) { storeRef?.prefetchTiles(hotPrefetch) }
+            }
+        }
+
+        val oldHot = HashSet<Long>(hotSet)
+        val removedFromHot = oldHot.apply { removeAll(newHot) }
+
+        hotSet.clear(); hotSet.addAll(newHot)
+
+        coroutineContext.ensureActive()
+        for (key in removedFromHot) {
+            coroutineContext.ensureActive()
+            scheduleFlushAndMaybeEvict(key, from = "HOT")
+        }
+        logMem()
+        startFlushLoopIfNeeded()
+    }
+
+    suspend fun updateViewport(bb: BoundingBox) {
+        if (restoringFromStore) return
+        coroutineContext.ensureActive()
+        val proj = projection ?: return
+        coroutineContext.ensureActive()
+        val p1 = proj.toLocalMeters(bb.latSouth, bb.lonWest)
+        val p2 = proj.toLocalMeters(bb.latNorth, bb.lonEast)
+        val minX = floor(min(p1.x, p2.x) / resolutionM).toInt()
+        val maxX = ceil(max(p1.x, p2.x) / resolutionM).toInt()
+        val minY = floor(min(p1.y, p2.y) / resolutionM).toInt()
+        val maxY = ceil(max(p1.y, p2.y) / resolutionM).toInt()
+        val tMinX = floor(minX.toDouble() / tileSize).toInt()
+        val tMaxX = floor((maxX - 1).toDouble() / tileSize).toInt()
+        val tMinY = floor(minY.toDouble() / tileSize).toInt()
+        val tMaxY = floor((maxY - 1).toDouble() / tileSize).toInt()
+
+        val newViz = HashSet<Long>((tMaxX - tMinX + 1) * (tMaxY - tMinY + 1))
+        val storeRef = store
+        // Prefetch: tudo que acabou de entrar em VIZ e ainda não está pronto
+        val vizPrefetch = if (storeRef != null) LinkedHashSet<TileKey>() else null
+
+        for (ty in tMinY..tMaxY) {
+            coroutineContext.ensureActive()
+            for (tx in tMinX..tMaxX) {
+                coroutineContext.ensureActive()
+                val key = TileKey(tx, ty).pack()
+                newViz.add(key)
+                val existing = tiles[key]
+                val shouldRetry =
+                    existing == null || (storeRef != null && pendingStoreLoads.contains(key))
+
+                if (vizPrefetch != null && shouldRetry) {
+                    vizPrefetch.add(TileKey(tx, ty))
+                }
+
+                if (!shouldRetry) continue
+
                 val st = storeRef?.loadTile(tx, ty)
                 if (st != null) {
                     val wasPending = pendingStoreLoads.remove(key)
@@ -316,98 +419,21 @@ class RasterCoverageEngine {
                 }
             }
         }
-
-        // Prefetch do anel imediatamente fora do HOT (tileRadiusHot + 1)
-        if (hotPrefetch != null) {
-            val ring = tileRadiusHot + 1
-            if (ring > 0) {
-                for (dy in -ring..ring) for (dx in -ring..ring) {
-                    if (max(abs(dx), abs(dy)) != ring) continue
-                    val tx = cTx + dx; val ty = cTy + dy
-                    val k = pack(tx, ty)
-                    val missingOrPending = (tiles[k] == null) || pendingStoreLoads.contains(k)
-                    if (missingOrPending) hotPrefetch.add(TileKey(tx, ty))
-                }
-            }
-            if (hotPrefetch.isNotEmpty()) {
-                // off-main; este método já roda em Dispatchers.Default, mas garantimos
-                withContext(Dispatchers.Default) { storeRef?.prefetchTiles(hotPrefetch) }
-            }
-        }
-
-        val oldHot = HashSet<Long>(hotSet)
-        val removedFromHot = oldHot.apply { removeAll(newHot) }
-
-        hotSet.clear(); hotSet.addAll(newHot)
-
-        for (key in removedFromHot) scheduleFlushAndMaybeEvict(key, from = "HOT")
-
-        logMem()
-        startFlushLoopIfNeeded()
-    }
-
-    suspend fun updateViewport(bb: BoundingBox) {
-        if (restoringFromStore) return
-        val proj = projection ?: return
-        val p1 = proj.toLocalMeters(bb.latSouth, bb.lonWest)
-        val p2 = proj.toLocalMeters(bb.latNorth, bb.lonEast)
-        val minX = floor(min(p1.x, p2.x) / resolutionM).toInt()
-        val maxX = ceil(max(p1.x, p2.x) / resolutionM).toInt()
-        val minY = floor(min(p1.y, p2.y) / resolutionM).toInt()
-        val maxY = ceil(max(p1.y, p2.y) / resolutionM).toInt()
-        val tMinX = floor(minX.toDouble() / tileSize).toInt()
-        val tMaxX = floor((maxX - 1).toDouble() / tileSize).toInt()
-        val tMinY = floor(minY.toDouble() / tileSize).toInt()
-        val tMaxY = floor((maxY - 1).toDouble() / tileSize).toInt()
-
-        val newViz = HashSet<Long>((tMaxX - tMinX + 1) * (tMaxY - tMinY + 1))
-        val storeRef = store
-        // Prefetch: tudo que acabou de entrar em VIZ e ainda não está pronto
-        val vizPrefetch = if (storeRef != null) LinkedHashSet<TileKey>() else null
-
-        for (ty in tMinY..tMaxY) for (tx in tMinX..tMaxX) {
-            val key = TileKey(tx, ty).pack()
-            newViz.add(key)
-            val existing = tiles[key]
-            val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
-
-            if (vizPrefetch != null && shouldRetry) {
-                vizPrefetch.add(TileKey(tx, ty))
-            }
-
-            if (!shouldRetry) continue
-
-            val st = storeRef?.loadTile(tx, ty)
-            if (st != null) {
-                val wasPending = pendingStoreLoads.remove(key)
-                val td = tileFromStore(st, forceMetrics = wasPending)
-                tiles[key] = td
-                dataLru.put(key, td)
-                if (existing == null) {
-                    cntTileAlloc.incrementAndGet()
-                }
-            } else {
-                    if (existing == null) {
-                    restoredTotals.add(key)
-                    val td = TileData(tileSize)
-                    tiles[key] = td
-                    dataLru.put(key, td)
-                    cntTileAlloc.incrementAndGet()
-                }
-                pendingStoreLoads.add(key)
-                }
-        }
         if (vizPrefetch != null && vizPrefetch.isNotEmpty()) {
+            coroutineContext.ensureActive()
             withContext(Dispatchers.Default) { storeRef?.prefetchTiles(vizPrefetch) }
-            }
+        }
 
         val oldViz = HashSet<Long>(vizSet)
         val removedFromViz = oldViz.apply { removeAll(newViz) }
 
         vizSet.clear(); vizSet.addAll(newViz)
 
-        for (key in removedFromViz) scheduleFlushAndMaybeEvict(key, from = "VIZ")
-
+        coroutineContext.ensureActive()
+        for (key in removedFromViz) {
+            coroutineContext.ensureActive()
+            scheduleFlushAndMaybeEvict(key, from = "VIZ")
+        }
         if (removedFromViz.isNotEmpty()) {
             Log.d(TAG_Q, "VIZ move: removed=${removedFromViz.size} qNow=${flushQueue.size} pending=${pendingFlush.size}")
         }

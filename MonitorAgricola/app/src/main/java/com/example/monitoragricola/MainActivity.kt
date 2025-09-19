@@ -165,6 +165,8 @@ class MainActivity : AppCompatActivity() {
 
     private var currentMinDistMeters: Double = 0.25
     private var viewportJob: Job? = null
+    private var hotCenterJob: Job? = null
+
 
 
     /* ======================= Rotas ======================= */
@@ -812,9 +814,10 @@ class MainActivity : AppCompatActivity() {
             startViewportUpdatesAfterRestore = true
             return
         }
-        viewportJob?.cancel()
+        val previousJob = viewportJob
         viewportJob = lifecycleScope.launch(Dispatchers.Default) {
             while (isActive) {
+                previousJob?.cancelAndJoin()
                 rasterEngine.updateViewport(map.boundingBox)
                 delay(1000L)
             }
@@ -828,8 +831,9 @@ class MainActivity : AppCompatActivity() {
         val bb = map.boundingBox
         if (bb == lastViewport) return
         lastViewport = bb
-        viewportJob?.cancel()
+        val previousJob = viewportJob
         viewportJob = lifecycleScope.launch(Dispatchers.Default) {
+            previousJob?.cancelAndJoin()
             rasterEngine.updateViewport(bb)
             withContext(Dispatchers.Main) { map.postInvalidate() }
         }
@@ -882,7 +886,9 @@ class MainActivity : AppCompatActivity() {
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
                         val lon = currentPos.longitude
-                        lifecycleScope.launch(Dispatchers.Default) {
+                        val previousJob = hotCenterJob
+                        hotCenterJob = lifecycleScope.launch(Dispatchers.Default) {
+                            previousJob?.cancelAndJoin()
                             rasterEngine.updateTractorHotCenter(lat, lon)
                         }
                         lastHotUpdate = now
@@ -923,7 +929,9 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (now - lastViewportUpdate > 500) {
                         val bb = map.boundingBox
-                        lifecycleScope.launch(Dispatchers.Default) {
+                        val previousJob = viewportJob
+                        viewportJob = lifecycleScope.launch(Dispatchers.Default) {
+                            previousJob?.cancelAndJoin()
                             rasterEngine.updateViewport(bb)
                         }
                         lastViewportUpdate = now
@@ -1765,6 +1773,8 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacksAndMessages(null)
         viewportJob?.cancel()
         viewportJob = null
+        hotCenterJob?.cancel()
+        hotCenterJob = null
 
         simulatorProvider?.stop()
         simulatorProvider = null
