@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.MotionEvent
 import android.widget.ImageButton
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,6 +19,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.isVisible
 import androidx.core.view.updatePadding
 import androidx.lifecycle.lifecycleScope
 import com.example.monitoragricola.R
@@ -123,8 +125,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvLinhaAlvo: TextView
     private lateinit var tvErroLateral: TextView
     private lateinit var rasterLoadingOverlay: View
+    private lateinit var progressSavingRaster: ProgressBar
+
 
     private var speedEmaKmh: Double? = null   // filtro exponencial da velocidade
+    private var savingOps = 0
+
 
 
 
@@ -195,6 +201,8 @@ class MainActivity : AppCompatActivity() {
         }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_main)
+        progressSavingRaster = findViewById(R.id.progressSavingRaster)
+
 
         coldStart = (savedInstanceState == null) // só é true no primeiro launch desse processo/atividade
 
@@ -258,8 +266,10 @@ class MainActivity : AppCompatActivity() {
                         if (job != null) {
                             val store = RoomTileStore(app.rasterDb, job.id)
                             rasterEngine.attachStore(store)
-                            withContext(Dispatchers.IO) {
-                                jobManager.saveRaster(job.id, store, rasterEngine)
+                            withSavingIndicator {
+                                withContext(Dispatchers.IO) {
+                                    jobManager.saveRaster(job.id, store, rasterEngine)
+                                }
 
                             }
                             rasterEngine.attachStore(freeTileStore)
@@ -475,8 +485,10 @@ class MainActivity : AppCompatActivity() {
             val store = currentTileStore
             if (store != null) {
                 lifecycleScope.launch {
-                    withContext(Dispatchers.IO + NonCancellable) {
-                        runCatching { jobManager.saveRaster(selId, store, rasterEngine) }
+                    withSavingIndicator {
+                        withContext(Dispatchers.IO + NonCancellable) {
+                            runCatching { jobManager.saveRaster(selId, store, rasterEngine) }
+                        }
                     }
                 }
             }
@@ -653,7 +665,13 @@ class MainActivity : AppCompatActivity() {
                             }
                             "Pausar trabalho" -> active?.let { job ->
                                 lifecycleScope.launch {
-                                    currentTileStore?.let { ts -> jobManager.saveRaster(job.id, ts, rasterEngine) }
+                                    currentTileStore?.let { ts ->
+                                        withSavingIndicator {
+                                            withContext(Dispatchers.IO) {
+                                                jobManager.saveRaster(job.id, ts, rasterEngine)
+                                            }
+                                        }
+                                    }
                                     jobManager.pause(job.id)
                                     rasterEngine.attachStore(freeTileStore)
                                     currentTileStore = freeTileStore
@@ -672,7 +690,13 @@ class MainActivity : AppCompatActivity() {
                             "Finalizar trabalho" -> active?.let { job ->
                                 lifecycleScope.launch {
                                     val areas = rasterEngine.getAreas()
-                                    currentTileStore?.let { ts -> jobManager.saveRaster(job.id, ts, rasterEngine) }
+                                    currentTileStore?.let { ts ->
+                                        withSavingIndicator {
+                                            withContext(Dispatchers.IO) {
+                                                jobManager.saveRaster(job.id, ts, rasterEngine)
+                                            }
+                                        }
+                                    }
                                     jobManager.finish(job.id, areas.totalM2, areas.overlapM2)
                                     rasterEngine.attachStore(freeTileStore)
                                     currentTileStore = freeTileStore
@@ -750,7 +774,13 @@ class MainActivity : AppCompatActivity() {
                     btnLigar.setImageResource(android.R.drawable.ic_media_play)
 
                     selId?.let { id ->
-                        currentTileStore?.let { ts -> jobManager.saveRaster(id, ts, rasterEngine) }
+                        currentTileStore?.let { ts ->
+                            withSavingIndicator {
+                                withContext(Dispatchers.IO) {
+                                    jobManager.saveRaster(id, ts, rasterEngine)
+                                }
+                            }
+                        }
                         withContext(Dispatchers.IO) { jobManager.pause(id) }
                         rasterEngine.attachStore(freeTileStore)
                         currentTileStore = freeTileStore
@@ -966,8 +996,11 @@ class MainActivity : AppCompatActivity() {
                     val id = selectedJobId
                     val store = currentTileStore
                     if (id != null && store != null) {
-                        jobManager.saveRaster(id, store, rasterEngine)
-                    } else {
+                        withSavingIndicator {
+                            withContext(Dispatchers.IO) {
+                                jobManager.saveRaster(id, store, rasterEngine)
+                            }
+                        }                    } else {
                         val snap = rasterEngine.exportSnapshot()
                         freeTileStore.snapshot(snap)
                     }
@@ -1657,14 +1690,41 @@ class MainActivity : AppCompatActivity() {
         btnLigar.isSelected = isWorking
     }
 
+    private suspend fun <T> withSavingIndicator(block: suspend () -> T): T {
+        withContext(Dispatchers.Main) {
+            savingOps++
+            progressSavingRaster.isVisible = savingOps > 0
+        }
+        return try {
+            block()
+        } finally {
+            onSavingFinished()
+        }
+    }
+
+    private fun onSavingFinished() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            savingOps = (savingOps - 1).coerceAtLeast(0)
+            progressSavingRaster.isVisible = savingOps > 0
+        } else {
+            lifecycleScope.launch(Dispatchers.Main) {
+                savingOps = (savingOps - 1).coerceAtLeast(0)
+                progressSavingRaster.isVisible = savingOps > 0
+            }
+        }
+    }
+
+
     private fun flushRasterSync(reason: String) {
         val selId = selectedJobId ?: return
         val store = currentTileStore ?: return
         try {
             // Tempo curto p/ não travar a UI: ajuste se necessário (400–1000 ms)
             runBlocking {
-                withTimeout(800) {
-                    withContext(Dispatchers.IO) { jobManager.saveRaster(selId, store, rasterEngine) }
+                withSavingIndicator {
+                    withTimeout(800) {
+                        withContext(Dispatchers.IO) { jobManager.saveRaster(selId, store, rasterEngine) }
+                    }
                 }
             }
             Log.d("RASTER", "flushRasterSync ok ($reason)")

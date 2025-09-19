@@ -11,9 +11,6 @@ import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import kotlin.math.*
 import kotlinx.coroutines.*
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.IntBuffer
 import java.util.LinkedHashSet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -128,15 +125,29 @@ class RasterCoverageEngine {
     private val cntBmpFree = AtomicLong(0)
     private val cntBmpReuse = AtomicLong(0)
 
-    private val renderBuf: IntBuffer =
-        ByteBuffer.allocateDirect(tileSize * tileSize * 4)
-            .order(ByteOrder.nativeOrder())
-            .asIntBuffer()
+    @Volatile
+    private var renderBuf: IntArray = IntArray(tileSize * tileSize)
 
 
     private var lastMemLogNs = 0L
     private var lastSavedLogged = 0L
     private var lastEnqLogged = 0L
+
+
+    private fun resetRenderBufferForTileSize(newTileSize: Int) {
+        val required = newTileSize * newTileSize
+        if (renderBuf.size != required) {
+            renderBuf = IntArray(required)
+        }
+    }
+
+    private fun ensureRenderBufferCapacity(requiredPixels: Int) {
+        val needed = max(requiredPixels, tileSize * tileSize)
+        if (renderBuf.size < needed) {
+            renderBuf = IntArray(needed)
+        }
+    }
+
 
     data class DebugStats(
         val tileSize: Int,
@@ -177,6 +188,7 @@ class RasterCoverageEngine {
         this.projection = ProjectionHelper(originLat, originLon)
         this.resolutionM = resolutionM.coerceAtLeast(0.01)
         this.tileSize = tileSize.coerceIn(128, 1024)
+        resetRenderBufferForTileSize(this.tileSize)
         clearCoverage()
         running = true
         Log.i(TAG_EVT, "startJob origin=($originLat,$originLon) res=$resolutionM tile=$tileSize")
@@ -923,7 +935,8 @@ class RasterCoverageEngine {
 
     fun buildOrGetBitmapFor(tx: Int, ty: Int): Bitmap? = buildOrGetBitmapFor(tx, ty, 1)
 
-    fun buildOrGetBitmapFor(tx: Int, ty: Int, stride: Int): Bitmap? {        val key = TileKey(tx, ty).pack()
+    fun buildOrGetBitmapFor(tx: Int, ty: Int, stride: Int): Bitmap? {
+        val key = TileKey(tx, ty).pack()
         val tile = tiles[key] ?: return null
         val rev = tile.rev
 
@@ -944,25 +957,34 @@ class RasterCoverageEngine {
             cntBmpAlloc.incrementAndGet()
         }
 
+        ensureRenderBufferCapacity(totalPixels)
+        val buffer = renderBuf
+
+
         when (renderMode) {
-            HotVizMode.COBERTURA -> fillCoverageColors(tile, blockSize)
-            HotVizMode.SOBREPOSICAO -> fillOverlapColors(tile, blockSize)
-            HotVizMode.TAXA -> fillRateColors(tile, blockSize, totalPixels)
-            HotVizMode.VELOCIDADE -> fillSpeedColors(tile, blockSize, totalPixels)
-            HotVizMode.SECOES -> fillSectionsColors(tile, blockSize, totalPixels)
+            HotVizMode.COBERTURA -> fillCoverageColors(tile, blockSize, buffer)
+            HotVizMode.SOBREPOSICAO -> fillOverlapColors(tile, blockSize, buffer)
+            HotVizMode.TAXA -> fillRateColors(tile, blockSize, totalPixels, buffer)
+            HotVizMode.VELOCIDADE -> fillSpeedColors(tile, blockSize, totalPixels, buffer)
+            HotVizMode.SECOES -> fillSectionsColors(tile, blockSize, totalPixels, buffer)
         }
 
-        renderBuf.position(0)
-        renderBuf.limit(totalPixels)
-        bmp.copyPixelsFromBuffer(renderBuf)
-        renderBuf.clear()
+        uploadRenderBuffer(buffer, bmp, outputSize, outputSize)
 
         bmpLru.put(key, blockSize, rev, bmp)
         return bmp
     }
 
-    private fun fillCoverageColors(tile: TileData, blockSize: Int) {
-        val counts = tile.count
+    private fun uploadRenderBuffer(buffer: IntArray, bmp: Bitmap, width: Int, height: Int) {
+        var row = 0
+        while (row < height) {
+            val offset = row * width
+            bmp.setPixels(buffer, offset, width, 0, row, width, 1)
+            row++
+        }
+    }
+
+    private fun fillCoverageColors(tile: TileData, blockSize: Int, buffer: IntArray) {        val counts = tile.count
         val size = tileSize
         forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
             var maxCount = 0
@@ -981,11 +1003,11 @@ class RasterCoverageEngine {
                 maxCount == 1 -> 0x8022AA22.toInt()
                 else -> 0xCCFF2222.toInt()
             }
-            renderBuf.put(dstIndex, v)
+            buffer[dstIndex] = v
         }
     }
 
-    private fun fillOverlapColors(tile: TileData, blockSize: Int) {
+    private fun fillOverlapColors(tile: TileData, blockSize: Int, buffer: IntArray) {
         val counts = tile.count
         val size = tileSize
         forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
@@ -1004,12 +1026,15 @@ class RasterCoverageEngine {
                 y++
             }
             val v = if (overlap) 0xCCFF2222.toInt() else 0
-            renderBuf.put(dstIndex, v)
+            buffer[dstIndex] = v
         }
     }
 
-    private fun fillRateColors(tile: TileData, blockSize: Int, outPixels: Int) {
-        val rates = tile.rate ?: return fillTransparent(outPixels)
+    private fun fillRateColors(tile: TileData, blockSize: Int, outPixels: Int, buffer: IntArray) {
+        val rates = tile.rate ?: run {
+            fillTransparent(outPixels, buffer)
+            return
+        }
         val size = tileSize
         forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
             var sum = 0f
@@ -1028,12 +1053,15 @@ class RasterCoverageEngine {
             val t = (avg / 100f).coerceIn(0f, 1f)
             val g = (t * 255).toInt()
             val b = 255 - g
-            renderBuf.put(dstIndex, (0xFF shl 24) or (0 shl 16) or (g shl 8) or b)
+            buffer[dstIndex] = (0xFF shl 24) or (0 shl 16) or (g shl 8) or b
         }
     }
 
-    private fun fillSpeedColors(tile: TileData, blockSize: Int, outPixels: Int) {
-        val speeds = tile.speed ?: return fillTransparent(outPixels)
+    private fun fillSpeedColors(tile: TileData, blockSize: Int, outPixels: Int, buffer: IntArray) {
+        val speeds = tile.speed ?: run {
+            fillTransparent(outPixels, buffer)
+            return
+        }
         val size = tileSize
         forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
             var sum = 0f
@@ -1052,12 +1080,15 @@ class RasterCoverageEngine {
             val t = (avg / 20f).coerceIn(0f, 1f)
             val r = (t * 255).toInt()
             val g = 255 - r
-            renderBuf.put(dstIndex, (0xFF shl 24) or (r shl 16) or (g shl 8) or 0)
+            buffer[dstIndex] = (0xFF shl 24) or (r shl 16) or (g shl 8) or 0
         }
     }
 
-    private fun fillSectionsColors(tile: TileData, blockSize: Int, outPixels: Int) {
-        val sections = tile.sections ?: return fillTransparent(outPixels)
+    private fun fillSectionsColors(tile: TileData, blockSize: Int, outPixels: Int, buffer: IntArray) {
+        val sections = tile.sections ?: run {
+            fillTransparent(outPixels, buffer)
+            return
+        }
         val size = tileSize
         forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
             var mask = 0
@@ -1078,14 +1109,13 @@ class RasterCoverageEngine {
                 mask and 4 != 0 -> 0xFFFFBB00.toInt()
                 else -> 0xFF999999.toInt()
             }
-            renderBuf.put(dstIndex, v)
+            buffer[dstIndex] = v
         }
     }
 
-    private fun fillTransparent(outPixels: Int) {
-        for (i in 0 until outPixels) {
-            renderBuf.put(i, 0)
-        }
+    private fun fillTransparent(outPixels: Int, buffer: IntArray) {
+        val limit = min(outPixels, buffer.size)
+        buffer.fill(0, 0, limit)
     }
 
     private inline fun forEachBlock(
@@ -1125,6 +1155,7 @@ class RasterCoverageEngine {
 
     fun importSnapshot(snap: RasterSnapshot) {
         originLat = snap.originLat; originLon = snap.originLon; resolutionM = snap.resolutionM; tileSize = snap.tileSize
+        resetRenderBufferForTileSize(tileSize)
         projection = ProjectionHelper(originLat, originLon)
         clearCoverage()
         for (st in snap.tiles) {
