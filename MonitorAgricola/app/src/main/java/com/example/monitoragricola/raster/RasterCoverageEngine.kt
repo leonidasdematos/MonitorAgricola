@@ -646,6 +646,7 @@ class RasterCoverageEngine {
         )
     }
 
+
     private fun rasterizeStripRect(
         x0: Double, y0: Double, ux: Double, uy: Double, nx: Double, ny: Double,
         d: Double, hw: Double, sectionsMask: Int, rateValue: Float?, turnSign: Int, isTail: Boolean
