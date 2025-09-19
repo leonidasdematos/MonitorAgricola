@@ -482,6 +482,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        if (::map.isInitialized) {
+            map.onPause()
+        }
         // 1) snapshot rápido raster antes de sair
         val selId = selectedJobId
         if (selId != null) {
