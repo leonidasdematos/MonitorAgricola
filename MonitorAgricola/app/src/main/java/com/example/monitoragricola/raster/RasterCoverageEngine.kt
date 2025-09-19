@@ -646,6 +646,49 @@ class RasterCoverageEngine {
         )
     }
 
+    private fun forEachHotTileInBounds(
+        px0: Int,
+        py0: Int,
+        px1: Int,
+        py1: Int,
+        action: (keyPacked: Long, tile: TileData, tileOriginX: Int, tileOriginY: Int, startPx: Int, startPy: Int, endPx: Int, endPy: Int) -> Unit
+    ) {
+        if (px1 < px0 || py1 < py0) return
+
+        val tileMinX = floorDivInt(px0, tileSize)
+        val tileMaxX = floorDivInt(px1, tileSize)
+        val tileMinY = floorDivInt(py0, tileSize)
+        val tileMaxY = floorDivInt(py1, tileSize)
+        if (tileMaxX < tileMinX || tileMaxY < tileMinY) return
+
+        for (ty in tileMinY..tileMaxY) {
+            val tileOriginY = ty * tileSize
+            val startPyTile = max(py0, tileOriginY)
+            val endPyTile = min(py1, tileOriginY + tileSize - 1)
+            if (startPyTile > endPyTile) continue
+
+            for (tx in tileMinX..tileMaxX) {
+                val tileOriginX = tx * tileSize
+                val startPxTile = max(px0, tileOriginX)
+                val endPxTile = min(px1, tileOriginX + tileSize - 1)
+                if (startPxTile > endPxTile) continue
+
+                val key = pack(tx, ty)
+                if (!hotSet.contains(key)) continue
+                val tile = tiles[key] ?: continue
+
+                action(key, tile, tileOriginX, tileOriginY, startPxTile, startPyTile, endPxTile, endPyTile)
+            }
+        }
+    }
+
+    private fun floorDivInt(a: Int, b: Int): Int {
+        var q = a / b
+        val r = a % b
+        if (r != 0 && (a xor b) < 0) q--
+        return q
+    }
+
 
     private fun rasterizeStripRect(
         x0: Double, y0: Double, ux: Double, uy: Double, nx: Double, ny: Double,
@@ -673,30 +716,49 @@ class RasterCoverageEngine {
         val epsUEnd   = if (isTail) 0.25 * res else 0.05 * res
         val baseEpsVInner = if (isTail) 0.02 * res else 0.15 * res
         val baseEpsVOuter = if (isTail) 0.20 * res else 0.60 * res
+        val tileStride = tileSize
 
-        for (py in py0..py1) for (px in px0..px1) {
-            val cx = (px + 0.5) * res; val cy = (py + 0.5) * res
-            val rx = cx - x0; val ry = cy - y0
-            val u = rx * ux + ry * uy
-            val v = rx * nx + ry * ny
-            if (u < -epsUStart || u >= d - epsUEnd) continue
-            val isOuter = when { turnSign > 0 && v < 0 -> true; turnSign < 0 && v > 0 -> true; else -> false }
-            val epsNeg = if (isOuter && v < 0) baseEpsVOuter else baseEpsVInner
-            val epsPos = if (isOuter && v > 0) baseEpsVOuter else baseEpsVInner
-            if (v < -hw - epsNeg || v > hw + epsPos) continue
+        forEachHotTileInBounds(px0, py0, px1, py1) { keyPacked, tile, tileOriginX, tileOriginY, startPx, startPy, endPx, endPy ->
+            val localStartX = startPx - tileOriginX
+            val localEndX = endPx - tileOriginX
+            val localStartY = startPy - tileOriginY
+            val localEndY = endPy - tileOriginY
 
-            val tx = Math.floorDiv(px, tileSize); val ty = Math.floorDiv(py, tileSize)
-            val key = pack(tx, ty)
-            if (!hotSet.contains(key)) continue
-            val tile = tiles[key] ?: continue
+            for (localPy in localStartY..localEndY) {
+                val py = tileOriginY + localPy
+                val cy = (py + 0.5) * res
+                val ry = cy - y0
+                val baseU = ry * uy
+                val baseV = ry * ny
+                val rowIndex = localPy * tileStride
 
-            val ix = px - tx * tileSize; val iy = py - ty * tileSize
-            val idx = iy * tileSize + ix
-            if (writePixel(tile, idx, sectionsMask, rateValue)) {
-                markTileDirty(key)
+                for (localPx in localStartX..localEndX) {
+                    val px = tileOriginX + localPx
+                    val cx = (px + 0.5) * res
+                    val rx = cx - x0
+
+                    val u = rx * ux + baseU
+                    if (u < -epsUStart || u >= d - epsUEnd) continue
+
+                    val v = rx * nx + baseV
+                    val isOuter = when {
+                        turnSign > 0 && v < 0 -> true
+                        turnSign < 0 && v > 0 -> true
+                        else -> false
+                    }
+                    val epsNeg = if (isOuter && v < 0) baseEpsVOuter else baseEpsVInner
+                    val epsPos = if (isOuter && v > 0) baseEpsVOuter else baseEpsVInner
+                    if (v < -hw - epsNeg || v > hw + epsPos) continue
+
+                    val idx = rowIndex + localPx
+                    if (writePixel(tile, idx, sectionsMask, rateValue)) {
+                        markTileDirty(keyPacked)
+                    }
+                }
             }
         }
     }
+
 
     private fun markFrontMask(x: Double, y: Double, ux: Double, uy: Double, widthM: Double, lengthM: Double) {
         val nx = -uy; val ny = ux
@@ -724,28 +786,46 @@ class RasterCoverageEngine {
 
         val curStamp: Short = strokeId.toShort()
         val epsV = 0.05 * res
+        val tileStride = tileSize
 
-        for (py in py0..py1) for (px in px0..px1) {
-            val cx = (px + 0.5) * res; val cy = (py + 0.5) * res
-            val rx = cx - x; val ry = cy - y
-            val u = rx * ux + ry * uy
-            val v = rx * nx + ry * ny
-            if (u < gapM || u >= gapM + lengthM) continue
-            if (abs(v) > hw + epsV) continue
-            val tx = Math.floorDiv(px, tileSize); val ty = Math.floorDiv(py, tileSize)
-            val key = pack(tx, ty)
-            if (!hotSet.contains(key)) continue
-            val tile = tiles[key] ?: continue
-            val ix = px - tx * tileSize; val iy = py - ty * tileSize
-            val idx = iy * tileSize + ix
-            val c = tile.count[idx].toInt() and 0xFF
-            if (c != 1) continue
-            val fs = ensureFrontStamp(tile)
-            fs[idx] = curStamp
-            tile.dirty = true; tile.rev += 1
-            markTileDirty(key)
+        forEachHotTileInBounds(px0, py0, px1, py1) { keyPacked, tile, tileOriginX, tileOriginY, startPx, startPy, endPx, endPy ->
+            val localStartX = startPx - tileOriginX
+            val localEndX = endPx - tileOriginX
+            val localStartY = startPy - tileOriginY
+            val localEndY = endPy - tileOriginY
+            var frontStamp = tile.frontStamp
+
+            for (localPy in localStartY..localEndY) {
+                val py = tileOriginY + localPy
+                val cy = (py + 0.5) * res
+                val ry = cy - y
+                val baseU = ry * uy
+                val baseV = ry * ny
+                val rowIndex = localPy * tileStride
+
+                for (localPx in localStartX..localEndX) {
+                    val px = tileOriginX + localPx
+                    val cx = (px + 0.5) * res
+                    val rx = cx - x
+                    val u = rx * ux + baseU
+                    if (u < gapM || u >= gapM + lengthM) continue
+
+                    val v = rx * nx + baseV
+                    if (abs(v) > hw + epsV) continue
+
+                    val idx = rowIndex + localPx
+                    val c = tile.count[idx].toInt() and 0xFF
+                    if (c != 1) continue
+
+                    val fs = frontStamp ?: ensureFrontStamp(tile).also { frontStamp = it }
+                    fs[idx] = curStamp
+                    tile.dirty = true; tile.rev += 1
+                    markTileDirty(keyPacked)
+                }
+            }
         }
     }
+
 
     private fun ensureFrontStamp(tile: TileData): ShortArray {
         var fs = tile.frontStamp
