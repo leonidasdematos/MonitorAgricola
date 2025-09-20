@@ -11,6 +11,8 @@ import com.example.monitoragricola.raster.store.toEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import org.locationtech.jts.geom.Coordinate
+import org.osmdroid.util.BoundingBox
 
 class JobsRepository(
     private val jobDao: JobDao,
@@ -21,6 +23,14 @@ class JobsRepository(
 
     private val rasterTileDao = rasterDb.rasterTileDao()
     private val rasterMetadataDao = rasterDb.jobRasterMetadataDao()
+
+    private data class TileBounds(
+        val minTx: Int,
+        val maxTx: Int,
+        val minTy: Int,
+        val maxTy: Int
+    )
+
 
     fun observeAll(): Flow<List<JobEntity>> = jobDao.observeAll()
 
@@ -61,6 +71,40 @@ class JobsRepository(
             val coords = rasterTileDao.listCoords(jobId)
             val persistedMetadata = rasterMetadataDao.select(jobId)?.toDomain()
             val effectiveMetadata = persistedMetadata ?: deriveFallbackRasterMetadata(jobId, engine, coords)
+            val tileBounds = coords.takeIf { it.isNotEmpty() }?.let { existing ->
+                TileBounds(
+                    minTx = existing.minOf { it.tx },
+                    maxTx = existing.maxOf { it.tx },
+                    minTy = existing.minOf { it.ty },
+                    maxTy = existing.maxOf { it.ty }
+                )
+            }
+
+            suspend fun finalizeRestore() {
+                withContext(Dispatchers.Default) {
+                    engine.finishStoreRestore()
+                    tileBounds?.let { bounds ->
+                        val projection = engine.currentProjection()
+                        if (projection != null) {
+                            val tileSizeMeters = effectiveMetadata.tileSize.toDouble() * effectiveMetadata.resolutionM
+                            val minXMeters = bounds.minTx.toDouble() * tileSizeMeters
+                            val maxXMeters = (bounds.maxTx + 1).toDouble() * tileSizeMeters
+                            val minYMeters = bounds.minTy.toDouble() * tileSizeMeters
+                            val maxYMeters = (bounds.maxTy + 1).toDouble() * tileSizeMeters
+                            val southWest = projection.toLatLon(Coordinate(minXMeters, minYMeters))
+                            val northEast = projection.toLatLon(Coordinate(maxXMeters, maxYMeters))
+                            val boundingBox = BoundingBox(
+                                maxOf(southWest.latitude, northEast.latitude),
+                                maxOf(southWest.longitude, northEast.longitude),
+                                minOf(southWest.latitude, northEast.latitude),
+                                minOf(southWest.longitude, northEast.longitude)
+                            )
+                            engine.updateViewport(boundingBox)
+                        }
+                    }
+                }
+            }
+
             withContext(Dispatchers.Default) {
                 engine.startJob(
                     effectiveMetadata.originLat,
@@ -71,20 +115,20 @@ class JobsRepository(
             }
             var restoreStarted = false
 
-            if (coords.isNotEmpty()) {
+            if (tileBounds != null) {
                 val keys = coords.map { TileKey(it.tx, it.ty) }
                 restoreStarted = true
                 try {
                     store.preloadTiles(engine, keys)
                 } catch (t: Throwable) {
                     engine.attachStore(store)
-                    withContext(Dispatchers.Default) { engine.finishStoreRestore() }
+                    finalizeRestore()
                     throw t
                 }
             }
             engine.attachStore(store)
             if (restoreStarted) {
-                withContext(Dispatchers.Default) { engine.finishStoreRestore() }
+                finalizeRestore()
             }
             coords.isNotEmpty()
         }

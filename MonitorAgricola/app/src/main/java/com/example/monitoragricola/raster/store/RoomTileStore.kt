@@ -164,8 +164,10 @@ class RoomTileStore(
     }
 
     suspend fun preloadTiles(engine: RasterCoverageEngine, keys: Collection<TileKey>) {
-        withContext(Dispatchers.Default) { engine.beginStoreRestore() }
         if (keys.isEmpty()) return
+
+        withContext(Dispatchers.Default) { engine.beginStoreRestore() }
+
 
         val unique = LinkedHashSet(keys)
         val chunk = ArrayList<TileKey>(PRELOAD_CHUNK_SIZE)
