@@ -166,21 +166,24 @@ class RoomTileStore(
     suspend fun preloadTiles(engine: RasterCoverageEngine, keys: Collection<TileKey>) {
         if (keys.isEmpty()) return
 
-        withContext(Dispatchers.Default) { engine.beginStoreRestore() }
+        try {
+            withContext(Dispatchers.Default) { engine.beginStoreRestore() }
 
-
-        val unique = LinkedHashSet(keys)
-        val chunk = ArrayList<TileKey>(PRELOAD_CHUNK_SIZE)
-        for (key in unique) {
-            chunk.add(key)
-            if (chunk.size >= PRELOAD_CHUNK_SIZE) {
+            val unique = LinkedHashSet(keys)
+            val chunk = ArrayList<TileKey>(PRELOAD_CHUNK_SIZE)
+            for (key in unique) {
+                chunk.add(key)
+                if (chunk.size >= PRELOAD_CHUNK_SIZE) {
+                    streamChunkToEngine(engine, chunk)
+                    chunk.clear()
+                }
+            }
+            if (chunk.isNotEmpty()) {
                 streamChunkToEngine(engine, chunk)
                 chunk.clear()
             }
-        }
-        if (chunk.isNotEmpty()) {
-            streamChunkToEngine(engine, chunk)
-            chunk.clear()
+        } finally {
+        withContext(Dispatchers.Default) { engine.finishStoreRestore() }
         }
     }
 

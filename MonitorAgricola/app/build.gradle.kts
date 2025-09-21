@@ -1,3 +1,6 @@
+import org.gradle.api.tasks.JavaExec
+
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -78,11 +81,21 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.3")
 
     // Testes
-    testImplementation("junit:junit:4.13.2")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+}
+
+tasks.register<JavaExec>("roomTileStoreSelfTest") {
+    group = "verification"
+    description = "Executa verificação de preload sem tiles persistidos para RoomTileStore"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.example.monitoragricola.raster.store.RoomTileStoreSelfTest")
+}
+
+tasks.named("check") {
+    dependsOn("roomTileStoreSelfTest")
 }
