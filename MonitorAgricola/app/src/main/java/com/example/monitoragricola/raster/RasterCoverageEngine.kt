@@ -371,6 +371,41 @@ class RasterCoverageEngine {
         restoringFromStore = false
     }
 
+    fun restorePersistedTotals(totals: RasterTotals, tileKeys: Collection<TileKey>) {
+        synchronized(totalsLock) {
+            totalOncePx = totals.totalOncePx
+            totalOverlapPx = totals.totalOverlapPx
+
+            sectionPx.fill(0)
+            val sectionSource = totals.sectionPx
+            val sectionCount = min(sectionPx.size, sectionSource.size)
+            for (i in 0 until sectionCount) {
+                sectionPx[i] = sectionSource[i]
+            }
+
+            rateSumBySection.fill(0.0)
+            val sumSource = totals.rateSumBySection
+            val sumCount = min(rateSumBySection.size, sumSource.size)
+            for (i in 0 until sumCount) {
+                rateSumBySection[i] = sumSource[i]
+            }
+
+            rateCountBySection.fill(0)
+            val countSource = totals.rateCountBySection
+            val countCount = min(rateCountBySection.size, countSource.size)
+            for (i in 0 until countCount) {
+                rateCountBySection[i] = countSource[i]
+            }
+
+            rateSumByArea = totals.rateSumByArea
+            rateCountByArea = totals.rateCountByArea
+        }
+
+        for (key in tileKeys) {
+            restoredTotals.add(key.pack())
+        }
+    }
+
 
     fun updateSpeed(speedKmh: Float?) { currentSpeedKmh = speedKmh }
 

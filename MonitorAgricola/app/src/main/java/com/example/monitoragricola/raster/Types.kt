@@ -21,6 +21,17 @@ data class RateStats(
     val meanByArea: Double
 )
 
+/** Totais agregados persistíveis do raster. */
+data class RasterTotals(
+    val totalOncePx: Long,
+    val totalOverlapPx: Long,
+    val sectionPx: LongArray,
+    val rateSumBySection: DoubleArray,
+    val rateCountBySection: LongArray,
+    val rateSumByArea: Double,
+    val rateCountByArea: Long
+)
+
 /** Snapshot serializável do raster. */
 data class RasterSnapshot(
     val originLat: Double,

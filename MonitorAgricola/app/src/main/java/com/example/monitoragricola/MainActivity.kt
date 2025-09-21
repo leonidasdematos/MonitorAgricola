@@ -59,6 +59,7 @@ import com.example.monitoragricola.raster.TileKey
 import com.example.monitoragricola.raster.TileData
 import com.example.monitoragricola.raster.RasterSnapshot
 import com.example.monitoragricola.raster.store.JobRasterMetadata
+import com.example.monitoragricola.raster.store.RasterTileCoord
 import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 
@@ -1164,83 +1165,53 @@ class MainActivity : AppCompatActivity() {
         rasterLoadingOverlay.visibility = View.VISIBLE
         rasterEngine.attachStore(noopTileStore)
         val store = RoomTileStore(app.rasterDb, jobId)
-        var restoreModeStarted = false
 
         val job = lifecycleScope.launch {
             var metadata: JobRasterMetadata? = null
+            var coords: List<RasterTileCoord> = emptyList()
+
+
+            suspend fun startEngine(meta: JobRasterMetadata?, applyTotals: Boolean) {
+                withContext(Dispatchers.Default) {
+                    if (meta != null) {
+                        rasterEngine.startJob(
+                            meta.originLat,
+                            meta.originLon,
+                            resolutionM = meta.resolutionM,
+                            tileSize = meta.tileSize
+                        )
+                        if (applyTotals) {
+                            meta.totals?.let { totals ->
+                                val keys = coords.map { TileKey(it.tx, it.ty) }
+                                rasterEngine.restorePersistedTotals(totals, keys)
+                            }
+                        }
+                    } else {
+                        val center = map.mapCenter
+                        rasterEngine.startJob(
+                            center.latitude,
+                            center.longitude,
+                            resolutionM = 0.10,
+                            tileSize = 256
+                        )
+                    }
+                }
+            }
+
             try {
                 metadata = jobsRepo.getRasterMetadata(jobId)
-                metadata?.let {
-                    rasterEngine.startJob(
-                        it.originLat,
-                        it.originLon,
-                        resolutionM = it.resolutionM,
-                        tileSize = it.tileSize
-                    )
-                }
-
-                val coords = jobsRepo.listRasterTileCoords(jobId)
-                if (coords.isEmpty()) {
-                    if (metadata == null) {
-                        val c = map.mapCenter
-                        rasterEngine.startJob(
-                            c.latitude,
-                            c.longitude,
-                            resolutionM = 0.10,
-                            tileSize = 256
-                        )
-                    }
-                } else {
-                    if (metadata == null) {
-                        val c = map.mapCenter
-                        rasterEngine.startJob(
-                            c.latitude,
-                            c.longitude,
-                            resolutionM = 0.10,
-                            tileSize = 256
-                        )
-                    }
-                    val keys = coords.map { TileKey(it.tx, it.ty) }
-                    restoreModeStarted = true
-                    store.preloadTiles(rasterEngine, keys)
-
-                }
+                coords = jobsRepo.listRasterTileCoords(jobId)
+                startEngine(metadata, applyTotals = true)
             } catch (ex: CancellationException) {
                 throw ex
             } catch (t: Throwable) {
                 Log.e(TAG_RASTER, "Falha ao restaurar raster do job $jobId", t)
-                val meta = metadata
-                if (meta != null) {
-                    rasterEngine.startJob(
-                        meta.originLat,
-                        meta.originLon,
-                        resolutionM = meta.resolutionM,
-                        tileSize = meta.tileSize
-                    )
-                } else {
-                    val c = map.mapCenter
-                    rasterEngine.startJob(
-                        c.latitude,
-                        c.longitude,
-                        resolutionM = 0.10,
-                        tileSize = 256
-                    )
-                }
+                startEngine(metadata, applyTotals = false)
             } finally {
-                if (restoreModeStarted) {
-                    try {
-                        withContext(Dispatchers.Default + NonCancellable) {
-                            rasterEngine.finishStoreRestore()
-                        }
-                    } catch (t: Throwable) {
-                        if (t is CancellationException) throw t
-                        Log.e(TAG_RASTER, "Falha ao finalizar restauração do raster do job $jobId", t)
-                    }
-                }
                 if (this != rasterRestoreJob) return@launch
-                val viewport = map.boundingBox
                 rasterEngine.attachStore(store)
                 currentTileStore = store
+                val viewport = map.boundingBox
                 try {
                     withContext(Dispatchers.Default) {
                         rasterEngine.updateViewport(viewport)
@@ -1256,11 +1227,9 @@ class MainActivity : AppCompatActivity() {
                 resumeViewportUpdatesAfterRestore()
                 rasterRestoreJob = null
                 recomposeCoverageMetrics()
-
             }
         }
         rasterRestoreJob = job
-
     }
 
     private fun refreshAreaUiFromEngine() {

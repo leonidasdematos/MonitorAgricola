@@ -95,7 +95,14 @@ object RoomTileStoreSelfTest {
             originLat = 0.0,
             originLon = 0.0,
             resolutionM = 0.1,
-            tileSize = 256
+            tileSize = 256,
+            totalOncePx = null,
+            totalOverlapPx = null,
+            sectionPx = null,
+            rateSumBySection = null,
+            rateCountBySection = null,
+            rateSumByArea = null,
+            rateCountByArea = null
         )
         val repository = JobsRepository(
             jobDao = NoopJobDao(),

@@ -8,12 +8,12 @@ import com.example.monitoragricola.raster.store.RasterDatabase
 import com.example.monitoragricola.raster.store.RasterTileCoord
 import com.example.monitoragricola.raster.store.toDomain
 import com.example.monitoragricola.raster.store.toEntity
+import com.example.monitoragricola.raster.RasterTotals
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
-import org.locationtech.jts.geom.Coordinate
-import org.osmdroid.util.BoundingBox
+import kotlin.math.roundToLong
+
 
 class JobsRepository(
     private val jobDao: JobDao,
@@ -25,12 +25,6 @@ class JobsRepository(
     private val rasterTileDao = rasterDb.rasterTileDao()
     private val rasterMetadataDao = rasterDb.jobRasterMetadataDao()
 
-    private data class TileBounds(
-        val minTx: Int,
-        val maxTx: Int,
-        val minTy: Int,
-        val maxTy: Int
-    )
 
 
     fun observeAll(): Flow<List<JobEntity>> = jobDao.observeAll()
@@ -72,40 +66,6 @@ class JobsRepository(
             val coords = rasterTileDao.listCoords(jobId)
             val persistedMetadata = rasterMetadataDao.select(jobId)?.toDomain()
             val effectiveMetadata = persistedMetadata ?: deriveFallbackRasterMetadata(jobId, engine, coords)
-            val tileBounds = coords.takeIf { it.isNotEmpty() }?.let { existing ->
-                TileBounds(
-                    minTx = existing.minOf { it.tx },
-                    maxTx = existing.maxOf { it.tx },
-                    minTy = existing.minOf { it.ty },
-                    maxTy = existing.maxOf { it.ty }
-                )
-            }
-
-            suspend fun finalizeRestore() {
-                withContext(Dispatchers.Default + NonCancellable) {
-                    engine.finishStoreRestore()
-                }
-                tileBounds?.let { bounds ->
-                    withContext(Dispatchers.Default) {                        val projection = engine.currentProjection()
-                        if (projection != null) {
-                            val tileSizeMeters = effectiveMetadata.tileSize.toDouble() * effectiveMetadata.resolutionM
-                            val minXMeters = bounds.minTx.toDouble() * tileSizeMeters
-                            val maxXMeters = (bounds.maxTx + 1).toDouble() * tileSizeMeters
-                            val minYMeters = bounds.minTy.toDouble() * tileSizeMeters
-                            val maxYMeters = (bounds.maxTy + 1).toDouble() * tileSizeMeters
-                            val southWest = projection.toLatLon(Coordinate(minXMeters, minYMeters))
-                            val northEast = projection.toLatLon(Coordinate(maxXMeters, maxYMeters))
-                            val boundingBox = BoundingBox(
-                                maxOf(southWest.latitude, northEast.latitude),
-                                maxOf(southWest.longitude, northEast.longitude),
-                                minOf(southWest.latitude, northEast.latitude),
-                                minOf(southWest.longitude, northEast.longitude)
-                            )
-                            engine.updateViewport(boundingBox)
-                        }
-                    }
-                }
-            }
 
             withContext(Dispatchers.Default) {
                 engine.startJob(
@@ -114,27 +74,16 @@ class JobsRepository(
                     effectiveMetadata.resolutionM,
                     effectiveMetadata.tileSize
                 )
-            }
-            var restoreStarted = false
-
-            if (tileBounds != null) {
-                val keys = coords.map { TileKey(it.tx, it.ty) }
-                restoreStarted = true
-                try {
-                    store.preloadTiles(engine, keys)
-                } catch (t: Throwable) {
-                    engine.attachStore(store)
-                    finalizeRestore()
-                    throw t
+                val totals = persistedMetadata?.totals
+                if (totals != null) {
+                    val keys = coords.map { TileKey(it.tx, it.ty) }
+                    engine.restorePersistedTotals(totals, keys)
                 }
             }
+
             engine.attachStore(store)
-            if (restoreStarted) {
-                finalizeRestore()
-            }
             coords.isNotEmpty()
         }
-
 
     /**
      * When the metadata row is missing we still need to boot the engine before streaming tiles.
@@ -158,6 +107,26 @@ class JobsRepository(
             tileSize = inferredTileSize ?: engine.currentTileSize()
         )
     }
+
+    private fun buildRasterTotals(engine: RasterCoverageEngine): RasterTotals {
+        val resolution = engine.currentResolutionM()
+        val areas = engine.getAreas()
+        val rateStats = engine.getRateStats()
+        val m2PerPx = resolution * resolution
+        val totalPx = (areas.totalM2 / m2PerPx).roundToLong().coerceAtLeast(0)
+        val overlapPx = (areas.overlapM2 / m2PerPx).roundToLong().coerceAtLeast(0)
+        val oncePx = (totalPx - overlapPx).coerceAtLeast(0)
+
+        return RasterTotals(
+            totalOncePx = oncePx,
+            totalOverlapPx = overlapPx,
+            sectionPx = areas.bySectionM2.copyOf(),
+            rateSumBySection = rateStats.sumBySection.copyOf(),
+            rateCountBySection = rateStats.countBySection.copyOf(),
+            rateSumByArea = rateStats.sumByArea,
+            rateCountByArea = rateStats.countByArea
+        )
+    }
     suspend fun saveRaster(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
         withContext(Dispatchers.IO) {
             val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
@@ -174,7 +143,8 @@ class JobsRepository(
                 originLat = engine.currentOriginLat(),
                 originLon = engine.currentOriginLon(),
                 resolutionM = engine.currentResolutionM(),
-                tileSize = engine.currentTileSize()
+                tileSize = engine.currentTileSize(),
+                totals = buildRasterTotals(engine)
             )
             rasterMetadataDao.upsert(metadata.toEntity())
         }
