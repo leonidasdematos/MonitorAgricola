@@ -131,6 +131,8 @@ class MainActivity : AppCompatActivity() {
 
     private var speedEmaKmh: Double? = null   // filtro exponencial da velocidade
     private var savingOps = 0
+    @Volatile private var suspendRasterUpdates = 0
+
 
 
 
@@ -270,7 +272,7 @@ class MainActivity : AppCompatActivity() {
                         if (job != null) {
                             val store = RoomTileStore(app.rasterDb, job.id)
                             rasterEngine.attachStore(store)
-                            withSavingIndicator {
+                            withSavingIndicator(suspendLoops = true) {
                                 withContext(Dispatchers.IO) {
                                     jobManager.saveRaster(job.id, store, rasterEngine)
                                 }
@@ -492,7 +494,7 @@ class MainActivity : AppCompatActivity() {
             val store = currentTileStore
             if (store != null) {
                 lifecycleScope.launch {
-                    withSavingIndicator {
+                    withSavingIndicator(suspendLoops = true) {
                         withContext(Dispatchers.IO + NonCancellable) {
                             runCatching { jobManager.saveRaster(selId, store, rasterEngine) }
                         }
@@ -673,7 +675,7 @@ class MainActivity : AppCompatActivity() {
                             "Pausar trabalho" -> active?.let { job ->
                                 lifecycleScope.launch {
                                     currentTileStore?.let { ts ->
-                                        withSavingIndicator {
+                                        withSavingIndicator(suspendLoops = true) {
                                             withContext(Dispatchers.IO) {
                                                 jobManager.saveRaster(job.id, ts, rasterEngine)
                                             }
@@ -698,7 +700,7 @@ class MainActivity : AppCompatActivity() {
                                 lifecycleScope.launch {
                                     val areas = rasterEngine.getAreas()
                                     currentTileStore?.let { ts ->
-                                        withSavingIndicator {
+                                        withSavingIndicator(suspendLoops = true) {
                                             withContext(Dispatchers.IO) {
                                                 jobManager.saveRaster(job.id, ts, rasterEngine)
                                             }
@@ -782,7 +784,7 @@ class MainActivity : AppCompatActivity() {
 
                     selId?.let { id ->
                         currentTileStore?.let { ts ->
-                            withSavingIndicator {
+                            withSavingIndicator(suspendLoops = true) {
                                 withContext(Dispatchers.IO) {
                                     jobManager.saveRaster(id, ts, rasterEngine)
                                 }
@@ -920,6 +922,8 @@ class MainActivity : AppCompatActivity() {
                         lastWorkingFlag = isWorking
                     }
 
+                    val skipRasterOps = suspendRasterUpdates > 0
+
                     lastPoint?.let { last ->
                         val dist = last.distanceToAsDouble(currentPos)
                         if (dist > 0.01) {
@@ -940,12 +944,14 @@ class MainActivity : AppCompatActivity() {
                         scheduleViewportUpdate(force = true)
 
                     }
-                    // Sempre atualiza o estado do implemento (barra, centro, articulação).
-                    // O ImplementoBase só pinta raster se estiver rodando (running=true).
-                    activeImplemento?.updatePosition(lastPoint, currentPos)
+                    if (!skipRasterOps) {
+                        // Sempre atualiza o estado do implemento (barra, centro, articulação).
+                        // O ImplementoBase só pinta raster se estiver rodando (running=true).
+                        activeImplemento?.updatePosition(lastPoint, currentPos)
+                    }
 
                     // Só grava telemetria do job quando estiver trabalhando.
-                    if (isWorking) {
+                    if (!skipRasterOps && isWorking) {
 
                         selectedJobId?.let { id ->
                             jobRecorder.onTick(
@@ -962,25 +968,27 @@ class MainActivity : AppCompatActivity() {
                     tvVelocidade.text = calcularVelocidadeCache(currentPos)
                     ajustarAmostragemPorVelocidade()
 
-                    // métricas vindas do raster
-                    recomposeCoverageMetrics()
+                    if (!skipRasterOps) {
+                        // métricas vindas do raster
+                        recomposeCoverageMetrics()
 
-                    // guias de rota (inalterado)
-                    val route = activeRoute
-                    if (route != null && routeRenderer != null) {
-                        val guidance = routeRenderer?.update(
-                            route = route,
-                            refLineWkb = refCenterWkb,
-                            tractorPos = currentPos,
-                            spacingM = route.spacingM.toDouble()
-                        )
-                        guidance?.let {
-                            if (::tvLinhaAlvo.isInitialized) tvLinhaAlvo.text = "Linha: ${it.laneIdx}"
-                            if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
+                        // guias de rota (inalterado)
+                        val route = activeRoute
+                        if (route != null && routeRenderer != null) {
+                            val guidance = routeRenderer?.update(
+                                route = route,
+                                refLineWkb = refCenterWkb,
+                                tractorPos = currentPos,
+                                spacingM = route.spacingM.toDouble()
+                            )
+                            guidance?.let {
+                                if (::tvLinhaAlvo.isInitialized) tvLinhaAlvo.text = "Linha: ${it.laneIdx}"
+                                if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
+                            }
                         }
-                    }
 
-                    updateImplementBarOverlay(lastPoint, currentPos)
+                        updateImplementBarOverlay(lastPoint, currentPos)
+                    }
                     lastPoint = currentPos
                 }
 
@@ -1169,6 +1177,8 @@ class MainActivity : AppCompatActivity() {
         val job = lifecycleScope.launch {
             var metadata: JobRasterMetadata? = null
             var coords: List<RasterTileCoord> = emptyList()
+            var tileKeys: List<TileKey> = emptyList()
+            var shouldRunLegacyFallback = false
 
 
             suspend fun startEngine(meta: JobRasterMetadata?, applyTotals: Boolean) {
@@ -1182,8 +1192,7 @@ class MainActivity : AppCompatActivity() {
                         )
                         if (applyTotals) {
                             meta.totals?.let { totals ->
-                                val keys = coords.map { TileKey(it.tx, it.ty) }
-                                rasterEngine.restorePersistedTotals(totals, keys)
+                                rasterEngine.restorePersistedTotals(totals, tileKeys)
                             }
                         }
                     } else {
@@ -1201,6 +1210,8 @@ class MainActivity : AppCompatActivity() {
             try {
                 metadata = jobsRepo.getRasterMetadata(jobId)
                 coords = jobsRepo.listRasterTileCoords(jobId)
+                tileKeys = coords.map { TileKey(it.tx, it.ty) }
+                shouldRunLegacyFallback = metadata?.totals == null && tileKeys.isNotEmpty()
                 startEngine(metadata, applyTotals = true)
             } catch (ex: CancellationException) {
                 throw ex
@@ -1209,6 +1220,10 @@ class MainActivity : AppCompatActivity() {
                 startEngine(metadata, applyTotals = false)
             } finally {
                 if (this != rasterRestoreJob) return@launch
+                if (shouldRunLegacyFallback) {
+                    runCatching { store.preloadTiles(rasterEngine, tileKeys) }
+                        .onFailure { Log.w(TAG_RASTER, "Falha ao restaurar totais legacy", it) }
+                }
                 rasterEngine.attachStore(store)
                 currentTileStore = store
                 val viewport = map.boundingBox
@@ -1223,6 +1238,17 @@ class MainActivity : AppCompatActivity() {
                 rasterOverlay.invalidateTiles()
                 map.invalidate()
                 refreshAreaUiFromEngine()
+                val hotSeed = lastPoint ?: run {
+                    if (::tractor.isInitialized) tractor.position else map.mapCenter
+                }
+                try {
+                    withContext(Dispatchers.Default) {
+                        rasterEngine.updateTractorHotCenter(hotSeed.latitude, hotSeed.longitude)
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    Log.w(TAG_RASTER, "Falha ao hidratar HOT após restore", t)
+                }
                 rasterLoadingOverlay.visibility = View.GONE
                 resumeViewportUpdatesAfterRestore()
                 rasterRestoreJob = null
@@ -1675,27 +1701,33 @@ class MainActivity : AppCompatActivity() {
         btnLigar.isSelected = isWorking
     }
 
-    private suspend fun <T> withSavingIndicator(block: suspend () -> T): T {
+    private suspend fun <T> withSavingIndicator(suspendLoops: Boolean = false, block: suspend () -> T): T {
         withContext(Dispatchers.Main) {
+            if (suspendLoops) {
+                suspendRasterUpdates++
+            }
             savingOps++
             progressSavingRaster.isVisible = savingOps > 0
         }
         return try {
             block()
         } finally {
-            onSavingFinished()
+            onSavingFinished(suspendLoops)
         }
     }
 
-    private fun onSavingFinished() {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
+    private fun onSavingFinished(releaseLoop: Boolean) {
+        val release = {
+            if (releaseLoop) {
+                suspendRasterUpdates = (suspendRasterUpdates - 1).coerceAtLeast(0)
+            }
             savingOps = (savingOps - 1).coerceAtLeast(0)
             progressSavingRaster.isVisible = savingOps > 0
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            release()
         } else {
-            lifecycleScope.launch(Dispatchers.Main) {
-                savingOps = (savingOps - 1).coerceAtLeast(0)
-                progressSavingRaster.isVisible = savingOps > 0
-            }
+            lifecycleScope.launch(Dispatchers.Main) { release() }
         }
     }
 
@@ -1706,7 +1738,7 @@ class MainActivity : AppCompatActivity() {
         try {
             // Tempo curto p/ não travar a UI: ajuste se necessário (400–1000 ms)
             runBlocking {
-                withSavingIndicator {
+                withSavingIndicator(suspendLoops = true) {
                     withTimeout(800) {
                         withContext(Dispatchers.IO) { jobManager.saveRaster(selId, store, rasterEngine) }
                     }

@@ -1,5 +1,6 @@
 package com.example.monitoragricola.jobs
 
+import android.util.Log
 import com.example.monitoragricola.jobs.db.*
 import com.example.monitoragricola.raster.RasterCoverageEngine
 import com.example.monitoragricola.raster.TileKey
@@ -64,6 +65,7 @@ class JobsRepository(
         withContext(Dispatchers.IO) {
             val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
             val coords = rasterTileDao.listCoords(jobId)
+            val tileKeys = coords.map { TileKey(it.tx, it.ty) }
             val persistedMetadata = rasterMetadataDao.select(jobId)?.toDomain()
             val effectiveMetadata = persistedMetadata ?: deriveFallbackRasterMetadata(jobId, engine, coords)
 
@@ -76,9 +78,13 @@ class JobsRepository(
                 )
                 val totals = persistedMetadata?.totals
                 if (totals != null) {
-                    val keys = coords.map { TileKey(it.tx, it.ty) }
-                    engine.restorePersistedTotals(totals, keys)
+                    engine.restorePersistedTotals(totals, tileKeys)
                 }
+            }
+
+            if (persistedMetadata?.totals == null && tileKeys.isNotEmpty()) {
+                runCatching { store.preloadTiles(engine, tileKeys) }
+                    .onFailure { Log.w("JobsRepository", "Falha ao hidratar raster legacy", it) }
             }
 
             engine.attachStore(store)
