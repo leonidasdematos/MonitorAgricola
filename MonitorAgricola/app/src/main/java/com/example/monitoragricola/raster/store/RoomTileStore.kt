@@ -9,6 +9,7 @@ import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.StoreTile as EngineStoreTile
 import com.example.monitoragricola.raster.RasterSnapshot
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
@@ -167,7 +168,7 @@ class RoomTileStore(
         if (keys.isEmpty()) return
 
         try {
-            withContext(Dispatchers.Default) { engine.beginStoreRestore() }
+            withContext(Dispatchers.Default + NonCancellable) { engine.beginStoreRestore() }
 
             val unique = LinkedHashSet(keys)
             val chunk = ArrayList<TileKey>(PRELOAD_CHUNK_SIZE)
@@ -183,7 +184,7 @@ class RoomTileStore(
                 chunk.clear()
             }
         } finally {
-        withContext(Dispatchers.Default) { engine.finishStoreRestore() }
+            withContext(Dispatchers.Default + NonCancellable) { engine.finishStoreRestore() }
         }
     }
 
