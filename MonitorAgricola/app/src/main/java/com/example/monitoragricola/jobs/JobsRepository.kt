@@ -9,6 +9,7 @@ import com.example.monitoragricola.raster.store.RasterTileCoord
 import com.example.monitoragricola.raster.store.toDomain
 import com.example.monitoragricola.raster.store.toEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import org.locationtech.jts.geom.Coordinate
@@ -81,10 +82,11 @@ class JobsRepository(
             }
 
             suspend fun finalizeRestore() {
-                withContext(Dispatchers.Default) {
+                withContext(Dispatchers.Default + NonCancellable) {
                     engine.finishStoreRestore()
-                    tileBounds?.let { bounds ->
-                        val projection = engine.currentProjection()
+                }
+                tileBounds?.let { bounds ->
+                    withContext(Dispatchers.Default) {                        val projection = engine.currentProjection()
                         if (projection != null) {
                             val tileSizeMeters = effectiveMetadata.tileSize.toDouble() * effectiveMetadata.resolutionM
                             val minXMeters = bounds.minTx.toDouble() * tileSizeMeters
