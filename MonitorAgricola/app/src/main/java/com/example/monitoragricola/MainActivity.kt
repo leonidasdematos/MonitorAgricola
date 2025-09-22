@@ -706,7 +706,7 @@ class MainActivity : AppCompatActivity() {
                                             }
                                         }
                                     }
-                                    jobManager.finish(job.id, areas.totalM2, areas.overlapM2)
+                                    jobManager.finish(job.id, areas.effectiveM2, areas.overlapM2)
                                     rasterEngine.attachStore(freeTileStore)
                                     currentTileStore = freeTileStore
                                     ImplementoSelector.clearForce(this@MainActivity)
@@ -923,6 +923,9 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val skipRasterOps = suspendRasterUpdates > 0
+                    // Mantém a geometria atualizada sempre e apenas pausa a pintura/telemetria.
+                    implBase?.setRasterSuspended(skipRasterOps)
+                    activeImplemento?.updatePosition(lastPoint, currentPos)
 
                     lastPoint?.let { last ->
                         val dist = last.distanceToAsDouble(currentPos)
@@ -943,11 +946,6 @@ class MainActivity : AppCompatActivity() {
                     if (now - lastViewportUpdate > 500) {
                         scheduleViewportUpdate(force = true)
 
-                    }
-                    if (!skipRasterOps) {
-                        // Sempre atualiza o estado do implemento (barra, centro, articulação).
-                        // O ImplementoBase só pinta raster se estiver rodando (running=true).
-                        activeImplemento?.updatePosition(lastPoint, currentPos)
                     }
 
                     // Só grava telemetria do job quando estiver trabalhando.
@@ -971,24 +969,22 @@ class MainActivity : AppCompatActivity() {
                     if (!skipRasterOps) {
                         // métricas vindas do raster
                         recomposeCoverageMetrics()
-
-                        // guias de rota (inalterado)
-                        val route = activeRoute
-                        if (route != null && routeRenderer != null) {
-                            val guidance = routeRenderer?.update(
-                                route = route,
-                                refLineWkb = refCenterWkb,
-                                tractorPos = currentPos,
-                                spacingM = route.spacingM.toDouble()
-                            )
-                            guidance?.let {
-                                if (::tvLinhaAlvo.isInitialized) tvLinhaAlvo.text = "Linha: ${it.laneIdx}"
-                                if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
-                            }
-                        }
-
-                        updateImplementBarOverlay(lastPoint, currentPos)
                     }
+                    // guias de rota (inalterado)
+                    val route = activeRoute
+                    if (route != null && routeRenderer != null) {
+                        val guidance = routeRenderer?.update(
+                            route = route,
+                            refLineWkb = refCenterWkb,
+                            tractorPos = currentPos,
+                            spacingM = route.spacingM.toDouble()
+                        )
+                        guidance?.let {
+                            if (::tvLinhaAlvo.isInitialized) tvLinhaAlvo.text = "Linha: ${it.laneIdx}"
+                            if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
+                        }
+                    }
+                    updateImplementBarOverlay(lastPoint, currentPos)
                     lastPoint = currentPos
                 }
 
@@ -1260,7 +1256,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshAreaUiFromEngine() {
         val areas = rasterEngine.getAreas()
-        tvArea.text = "Área: ${formatArea(areas.totalM2)}"
+        tvArea.text = "Área: ${formatArea(areas.effectiveM2)}"
         tvSobreposicao.text = "Sobreposição: ${formatArea(areas.overlapM2)}"
     }
 
@@ -1324,7 +1320,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun recomposeCoverageMetrics() {
         val areas = rasterEngine.getAreas()
-        tvArea.text = "Área: ${formatArea(areas.totalM2)}"
+        tvArea.text = "Área: ${formatArea(areas.effectiveM2)}"
         tvSobreposicao.text = "Sobreposição: ${formatArea(areas.overlapM2)}"
     }
 

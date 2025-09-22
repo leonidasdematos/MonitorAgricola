@@ -9,8 +9,12 @@ import android.graphics.Color
 enum class HotVizMode { COBERTURA, SOBREPOSICAO, TAXA, VELOCIDADE, SECOES }
 
 /** Métricas de área. */
-data class Areas(val totalM2: Double, val overlapM2: Double, val bySectionM2: LongArray)
-
+data class Areas(
+    val totalM2: Double,
+    val effectiveM2: Double,
+    val overlapM2: Double,
+    val bySectionM2: LongArray
+)
 /** Métricas de taxa. */
 data class RateStats(
     val sumBySection: DoubleArray,

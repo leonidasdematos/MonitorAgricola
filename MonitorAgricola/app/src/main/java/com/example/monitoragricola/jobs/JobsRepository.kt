@@ -119,9 +119,8 @@ class JobsRepository(
         val areas = engine.getAreas()
         val rateStats = engine.getRateStats()
         val m2PerPx = resolution * resolution
-        val totalPx = (areas.totalM2 / m2PerPx).roundToLong().coerceAtLeast(0)
         val overlapPx = (areas.overlapM2 / m2PerPx).roundToLong().coerceAtLeast(0)
-        val oncePx = (totalPx - overlapPx).coerceAtLeast(0)
+        val oncePx = (areas.effectiveM2 / m2PerPx).roundToLong().coerceAtLeast(0)
 
         return RasterTotals(
             totalOncePx = oncePx,

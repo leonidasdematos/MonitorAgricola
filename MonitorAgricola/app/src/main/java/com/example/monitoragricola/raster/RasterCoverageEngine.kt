@@ -410,11 +410,13 @@ class RasterCoverageEngine {
     fun updateSpeed(speedKmh: Float?) { currentSpeedKmh = speedKmh }
 
     fun getAreas(): Areas {
-        val pxArea = (totalOncePx + totalOverlapPx)
+        val oncePx = totalOncePx
+        val overlapPx = totalOverlapPx
         val m2PerPx = resolutionM * resolutionM
-        val totalM2 = pxArea * m2PerPx
-        val overlapM2 = totalOverlapPx * m2PerPx
-        return Areas(totalM2, overlapM2, sectionPx)
+        val effectiveM2 = oncePx.toDouble() * m2PerPx
+        val overlapM2 = overlapPx.toDouble() * m2PerPx
+        val totalM2 = (oncePx + overlapPx).toDouble() * m2PerPx
+        return Areas(totalM2, effectiveM2, overlapM2, sectionPx)
     }
 
     fun getRateStats(): RateStats {

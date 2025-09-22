@@ -18,6 +18,8 @@ abstract class ImplementoBase(
 ) : Implemento {
 
     protected var running = false
+    @Volatile private var rasterSuspended = false
+
 
     private var paintModel: PaintModel = PaintModel.ENTRADA_COMPENSADA
     fun setPaintModel(model: PaintModel) { paintModel = model }
@@ -91,6 +93,14 @@ abstract class ImplementoBase(
     override fun start() { running = true }
     override fun stop()  { running = false }
 
+    /**
+     * Suspende temporariamente a pintura no raster, mantendo o restante da geometria
+     * atualizada (centro, barra, articulação).
+     */
+    fun setRasterSuspended(suspended: Boolean) {
+        rasterSuspended = suspended
+    }
+
     override fun updatePosition(last: GeoPoint?, current: GeoPoint) {
         if (last == null){ return }
 
@@ -142,7 +152,7 @@ abstract class ImplementoBase(
         val dImpl = hypot(curImplLocal.x - lastImplLocal.x, curImplLocal.y - lastImplLocal.y)
 
         // Pintura raster só quando rodando
-        if (running && dImpl >= EPS_IMPL) {
+        if (running && !rasterSuspended && dImpl >= EPS_IMPL) {
             val lastImplLL = proj.toLatLon(lastImplLocal)
             val curImplLL2 = proj.toLatLon(curImplLocal)
             val lastImpl = GeoPoint(lastImplLL.latitude, lastImplLL.longitude)

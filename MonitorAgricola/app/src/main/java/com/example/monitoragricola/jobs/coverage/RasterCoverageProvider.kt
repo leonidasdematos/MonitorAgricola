@@ -28,7 +28,7 @@ class RasterCoverageProvider(
         return CoverageSnapshot(
             coveredOnceWkb = null,         // não salvamos vetorial nesta fase
             coveredOverlapWkb = null,      // idem
-            areaM2 = areas.totalM2,
+            areaM2 = areas.effectiveM2,
             overlapM2 = areas.overlapM2,
             boundsGeoJson = bbox
         )
