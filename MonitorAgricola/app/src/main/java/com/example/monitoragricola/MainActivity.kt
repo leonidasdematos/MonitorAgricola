@@ -29,8 +29,9 @@ import com.example.monitoragricola.implementos.ImplementoSnapshot
 import com.example.monitoragricola.jobs.JobEventType
 import com.example.monitoragricola.map.*
 import com.example.monitoragricola.ui.routes.RoutesActivity
-import org.osmdroid.tileprovider.MapTileProviderBasic
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.osmdroid.config.Configuration
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
@@ -132,8 +133,8 @@ class MainActivity : AppCompatActivity() {
     private var speedEmaKmh: Double? = null   // filtro exponencial da velocidade
     private var savingOps = 0
     @Volatile private var suspendRasterUpdates = 0
-
-
+    private val rasterSaveMutex = Mutex()
+    @Volatile private var pendingRasterSaveJob: Job? = null
 
 
 
@@ -273,10 +274,7 @@ class MainActivity : AppCompatActivity() {
                             val store = RoomTileStore(app.rasterDb, job.id)
                             rasterEngine.attachStore(store)
                             withSavingIndicator(suspendLoops = true) {
-                                withContext(Dispatchers.IO) {
-                                    jobManager.saveRaster(job.id, store, rasterEngine)
-                                }
-
+                                persistRaster(job.id, store)
                             }
                             rasterEngine.attachStore(freeTileStore)
                         }
@@ -493,11 +491,17 @@ class MainActivity : AppCompatActivity() {
         if (selId != null) {
             val store = currentTileStore
             if (store != null) {
-                lifecycleScope.launch {
+                val job = lifecycleScope.launch {
                     withSavingIndicator(suspendLoops = true) {
-                        withContext(Dispatchers.IO + NonCancellable) {
-                            runCatching { jobManager.saveRaster(selId, store, rasterEngine) }
+                        withContext(NonCancellable) {
+                            runCatching { persistRaster(selId, store) }
                         }
+                    }
+                }
+                pendingRasterSaveJob = job
+                job.invokeOnCompletion {
+                    if (pendingRasterSaveJob === job) {
+                        pendingRasterSaveJob = null
                     }
                 }
             }
@@ -676,9 +680,7 @@ class MainActivity : AppCompatActivity() {
                                 lifecycleScope.launch {
                                     currentTileStore?.let { ts ->
                                         withSavingIndicator(suspendLoops = true) {
-                                            withContext(Dispatchers.IO) {
-                                                jobManager.saveRaster(job.id, ts, rasterEngine)
-                                            }
+                                            persistRaster(job.id, ts)
                                         }
                                     }
                                     jobManager.pause(job.id)
@@ -701,9 +703,7 @@ class MainActivity : AppCompatActivity() {
                                     val areas = rasterEngine.getAreas()
                                     currentTileStore?.let { ts ->
                                         withSavingIndicator(suspendLoops = true) {
-                                            withContext(Dispatchers.IO) {
-                                                jobManager.saveRaster(job.id, ts, rasterEngine)
-                                            }
+                                            persistRaster(job.id, ts)
                                         }
                                     }
                                     jobManager.finish(job.id, areas.effectiveM2, areas.overlapM2)
@@ -785,9 +785,7 @@ class MainActivity : AppCompatActivity() {
                     selId?.let { id ->
                         currentTileStore?.let { ts ->
                             withSavingIndicator(suspendLoops = true) {
-                                withContext(Dispatchers.IO) {
-                                    jobManager.saveRaster(id, ts, rasterEngine)
-                                }
+                                persistRaster(id, ts)
                             }
                         }
                         withContext(Dispatchers.IO) { jobManager.pause(id) }
@@ -1013,10 +1011,9 @@ class MainActivity : AppCompatActivity() {
                     val store = currentTileStore
                     if (id != null && store != null) {
                         withSavingIndicator {
-                            withContext(Dispatchers.IO) {
-                                jobManager.saveRaster(id, store, rasterEngine)
-                            }
-                        }                    } else {
+                            persistRaster(id, store)
+                        }
+                    } else {
                         val snap = rasterEngine.exportSnapshot()
                         freeTileStore.snapshot(snap)
                     }
@@ -1167,7 +1164,6 @@ class MainActivity : AppCompatActivity() {
         rasterRestoreJob = null
         pauseViewportUpdatesForRestore()
         rasterLoadingOverlay.visibility = View.VISIBLE
-        rasterEngine.attachStore(noopTileStore)
         val store = RoomTileStore(app.rasterDb, jobId)
 
         val job = lifecycleScope.launch {
@@ -1176,29 +1172,37 @@ class MainActivity : AppCompatActivity() {
             var tileKeys: List<TileKey> = emptyList()
             var shouldRunLegacyFallback = false
 
+            waitForPendingRasterPersistence()
+            rasterSaveMutex.withLock {
+                rasterEngine.attachStore(noopTileStore)
+                currentTileStore = null
+            }
+
 
             suspend fun startEngine(meta: JobRasterMetadata?, applyTotals: Boolean) {
-                withContext(Dispatchers.Default) {
-                    if (meta != null) {
-                        rasterEngine.startJob(
-                            meta.originLat,
-                            meta.originLon,
-                            resolutionM = meta.resolutionM,
-                            tileSize = meta.tileSize
-                        )
-                        if (applyTotals) {
-                            meta.totals?.let { totals ->
-                                rasterEngine.restorePersistedTotals(totals, tileKeys)
+                rasterSaveMutex.withLock {
+                    withContext(Dispatchers.Default) {
+                        if (meta != null) {
+                            rasterEngine.startJob(
+                                meta.originLat,
+                                meta.originLon,
+                                resolutionM = meta.resolutionM,
+                                tileSize = meta.tileSize
+                            )
+                            if (applyTotals) {
+                                meta.totals?.let { totals ->
+                                    rasterEngine.restorePersistedTotals(totals, tileKeys)
+                                }
                             }
+                        } else {
+                            val center = map.mapCenter
+                            rasterEngine.startJob(
+                                center.latitude,
+                                center.longitude,
+                                resolutionM = 0.10,
+                                tileSize = 256
+                            )
                         }
-                    } else {
-                        val center = map.mapCenter
-                        rasterEngine.startJob(
-                            center.latitude,
-                            center.longitude,
-                            resolutionM = 0.10,
-                            tileSize = 256
-                        )
                     }
                 }
             }
@@ -1217,34 +1221,39 @@ class MainActivity : AppCompatActivity() {
             } finally {
                 if (this != rasterRestoreJob) return@launch
                 if (shouldRunLegacyFallback) {
-                    runCatching { store.preloadTiles(rasterEngine, tileKeys) }
-                        .onFailure { Log.w(TAG_RASTER, "Falha ao restaurar totais legacy", it) }
+                    runCatching {
+                        rasterSaveMutex.withLock {
+                            store.preloadTiles(rasterEngine, tileKeys)
+                        }
+                    }.onFailure { Log.w(TAG_RASTER, "Falha ao restaurar totais legacy", it) }
                 }
-                rasterEngine.attachStore(store)
-                currentTileStore = store
                 val viewport = map.boundingBox
-                try {
-                    withContext(Dispatchers.Default) {
-                        rasterEngine.updateViewport(viewport)
+                val hotSeed = lastPoint ?: run {
+                    if (::tractor.isInitialized) tractor.position else map.mapCenter
+                }
+                rasterSaveMutex.withLock {
+                    rasterEngine.attachStore(store)
+                    currentTileStore = store
+                    try {
+                        withContext(Dispatchers.Default) {
+                            rasterEngine.updateViewport(viewport)
+                        }
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        Log.e(TAG_RASTER, "Falha ao recarregar tiles visíveis", t)
                     }
-                } catch (t: Throwable) {
-                    if (t is CancellationException) throw t
-                    Log.e(TAG_RASTER, "Falha ao recarregar tiles visíveis", t)
+                    try {
+                        withContext(Dispatchers.Default) {
+                            rasterEngine.updateTractorHotCenter(hotSeed.latitude, hotSeed.longitude)
+                        }
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        Log.w(TAG_RASTER, "Falha ao hidratar HOT após restore", t)
+                    }
                 }
                 rasterOverlay.invalidateTiles()
                 map.invalidate()
                 refreshAreaUiFromEngine()
-                val hotSeed = lastPoint ?: run {
-                    if (::tractor.isInitialized) tractor.position else map.mapCenter
-                }
-                try {
-                    withContext(Dispatchers.Default) {
-                        rasterEngine.updateTractorHotCenter(hotSeed.latitude, hotSeed.longitude)
-                    }
-                } catch (t: Throwable) {
-                    if (t is CancellationException) throw t
-                    Log.w(TAG_RASTER, "Falha ao hidratar HOT após restore", t)
-                }
                 rasterLoadingOverlay.visibility = View.GONE
                 resumeViewportUpdatesAfterRestore()
                 rasterRestoreJob = null
@@ -1666,23 +1675,26 @@ class MainActivity : AppCompatActivity() {
             // IMPORTANTE: restoreRasterOnMap deve importar no *mesmo* rasterEngine já criado
             restoreRasterOnMap(selId)
             Log.d("RASTER", "mapReady=$mapReady payloadRestaurado=SIM")
-            Log.d("RASTER", "origin=${rasterEngine.currentOriginLat()},${rasterEngine.currentOriginLon()} res=${rasterEngine.currentResolutionM()} tile=${rasterEngine.currentTileSize()}")
-
-
-            rasterEngine.invalidateTiles()
-            map.invalidate()
+            Log.d(
+                "RASTER",
+                "origin=${rasterEngine.currentOriginLat()},${rasterEngine.currentOriginLon()} res=${rasterEngine.currentResolutionM()} tile=${rasterEngine.currentTileSize()}"
+            )
         } else {
-            // Modo livre
-            rasterEngine.attachStore(freeTileStore)
-            val snap = freeTileStore.restore()
-            if (snap != null) {
-                rasterEngine.importSnapshot(snap)
-            } else {
+            lifecycleScope.launch {
+                waitForPendingRasterPersistence()
+                val snap = withContext(Dispatchers.IO) { freeTileStore.restore() }
+                rasterSaveMutex.withLock {
+                    rasterEngine.attachStore(freeTileStore)
+                    if (snap != null) {
+                        rasterEngine.importSnapshot(snap)
+                    } else {
+                        rasterEngine.invalidateTiles()
+                    }
+                }
+                rasterOverlay.invalidateTiles()
+                map.invalidate()
+                recomposeCoverageMetrics()
             }
-            rasterEngine.invalidateTiles()
-            map.invalidate()
-            recomposeCoverageMetrics()
-
         }
     }
 
@@ -1727,6 +1739,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private suspend fun persistRaster(jobId: Long, store: TileStore) {
+        rasterSaveMutex.withLock {
+            jobManager.saveRaster(jobId, store, rasterEngine)
+        }
+    }
+
+    private suspend fun waitForPendingRasterPersistence() {
+        val pending = pendingRasterSaveJob
+        if (pending != null && pending.isActive) {
+            try {
+                pending.join()
+            } catch (_: CancellationException) {
+            }
+        }
+    }
+
+
 
     private fun flushRasterSync(reason: String) {
         val selId = selectedJobId ?: return
@@ -1735,8 +1764,9 @@ class MainActivity : AppCompatActivity() {
             // Tempo curto p/ não travar a UI: ajuste se necessário (400–1000 ms)
             runBlocking {
                 withSavingIndicator(suspendLoops = true) {
+                    waitForPendingRasterPersistence()
                     withTimeout(800) {
-                        withContext(Dispatchers.IO) { jobManager.saveRaster(selId, store, rasterEngine) }
+                        persistRaster(selId, store)
                     }
                 }
             }
