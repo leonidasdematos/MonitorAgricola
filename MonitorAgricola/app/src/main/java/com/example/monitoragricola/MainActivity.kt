@@ -462,7 +462,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
 
-        try { flushRasterSync("onStop") } catch (_: Throwable) {}
+        lifecycleScope.launch { flushRasterSync("onStop") }
 
         val shouldKeep = isWorking && !isFinishing
         if (!shouldKeep) {
@@ -493,7 +493,7 @@ class MainActivity : AppCompatActivity() {
             if (store != null) {
                 val job = lifecycleScope.launch {
                     withSavingIndicator(suspendLoops = true) {
-                        withContext(NonCancellable) {
+                        withContext(Dispatchers.IO + NonCancellable) {
                             runCatching { persistRaster(selId, store) }
                         }
                     }
@@ -1757,13 +1757,13 @@ class MainActivity : AppCompatActivity() {
 
 
 
-    private fun flushRasterSync(reason: String) {
+    private suspend fun flushRasterSync(reason: String) {
         val selId = selectedJobId ?: return
         val store = currentTileStore ?: return
         try {
             // Tempo curto p/ não travar a UI: ajuste se necessário (400–1000 ms)
-            runBlocking {
-                withSavingIndicator(suspendLoops = true) {
+            withSavingIndicator(suspendLoops = true) {
+                withContext(Dispatchers.IO) {
                     waitForPendingRasterPersistence()
                     withTimeout(800) {
                         persistRaster(selId, store)
@@ -1777,7 +1777,7 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onSaveInstanceState(outState: Bundle) {
         // Flush rápido — chamado em rota “fechar / background”
-        flushRasterSync("onSaveInstanceState")
+        lifecycleScope.launch { flushRasterSync("onSaveInstanceState") }
         super.onSaveInstanceState(outState)
     }
     // Salva imediatamente o estado play/pause (e job atual para telemetria visual)
