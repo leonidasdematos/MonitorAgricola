@@ -257,6 +257,11 @@ class MainActivity : AppCompatActivity() {
         )
 
         lifecycleScope.launch {
+            if (keptRunningInBackground) {
+                clearResumeExtras()
+                return@launch
+            }
+
             // 1) Retomada vinda da TrabalhosActivity
             val intentJobId = intent.getLongExtra("resume_job_id", -1L)
             if (intentJobId > 0) {

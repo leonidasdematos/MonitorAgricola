@@ -622,7 +622,9 @@ class RasterCoverageEngine {
         current: GeoPoint,
         implementWidthMeters: Double,
         activeSectionsMask: Int,
-        rateValue: Float?
+        rateValue: Float?,
+        strokeRightX: Double? = null,
+        strokeRightY: Double? = null
     ) {
         dirtyTileKeys.clear()
         val proj = projection ?: return
@@ -637,6 +639,13 @@ class RasterCoverageEngine {
 
         val ux = dx / dist
         val uy = dy / dist
+
+        val (rightX, rightY) = if (strokeRightX != null && strokeRightY != null) {
+            val n = hypot(strokeRightX, strokeRightY)
+            if (n >= 1e-9) (strokeRightX / n) to (strokeRightY / n) else (-uy) to ux
+        } else {
+            (-uy) to ux
+        }
 
         val hadDir = hasLastDir
         val prevUx = lastUx
@@ -668,8 +677,8 @@ class RasterCoverageEngine {
             val t = i.toDouble() / steps
             val cx = p0.x + dx * t
             val cy = p0.y + dy * t
-            drawSweptStrip(px, py, cx, cy, implementWidthMeters, activeSectionsMask, rateValue, turnSign)
-            paintTailRect(cx, cy, ux, uy, implementWidthMeters, activeSectionsMask, rateValue, turnSign)
+            drawSweptStrip(px, py, cx, cy, implementWidthMeters, activeSectionsMask, rateValue, turnSign, rightX, rightY)
+            paintTailRect(cx, cy, ux, uy, implementWidthMeters, activeSectionsMask, rateValue, turnSign, rightX, rightY)
             px = cx; py = cy
         }
 
@@ -679,25 +688,26 @@ class RasterCoverageEngine {
 
     private fun drawSweptStrip(
         x0: Double, y0: Double, x1: Double, y1: Double,
-        widthM: Double, sectionsMask: Int, rateValue: Float?, turnSign: Int
+        widthM: Double, sectionsMask: Int, rateValue: Float?, turnSign: Int,
+        rightX: Double, rightY: Double
     ) {
         val vx = x1 - x0; val vy = y1 - y0
         val d = hypot(vx, vy)
         if (d < 0.20 * resolutionM) return
         val inv = 1.0 / d
         val ux = vx * inv; val uy = vy * inv
-        val nx = -uy; val ny = ux
-        rasterizeStripRect(x0, y0, ux, uy, nx, ny, d, widthM * 0.5, sectionsMask, rateValue, turnSign, isTail = false)
+        rasterizeStripRect(x0, y0, ux, uy, rightX, rightY, d, widthM * 0.5, sectionsMask, rateValue, turnSign, isTail = false)
+
     }
 
     private fun paintTailRect(
         cx: Double, cy: Double, ux: Double, uy: Double,
-        widthM: Double, sectionsMask: Int, rateValue: Float?, turnSign: Int
+        widthM: Double, sectionsMask: Int, rateValue: Float?, turnSign: Int,
+        rightX: Double, rightY: Double
     ) {
         val tailLen = max(TAIL_LEN_W_FACTOR * widthM, TAIL_LEN_MIN_PX * resolutionM)
-        val nx = -uy; val ny = ux
         rasterizeStripRect(
-            cx - ux * tailLen, cy - uy * tailLen, ux, uy, nx, ny, tailLen, widthM * 0.5,
+            cx - ux * tailLen, cy - uy * tailLen, ux, uy, rightX, rightY, tailLen, widthM * 0.5,
             sectionsMask, rateValue, turnSign, isTail = true
         )
     }

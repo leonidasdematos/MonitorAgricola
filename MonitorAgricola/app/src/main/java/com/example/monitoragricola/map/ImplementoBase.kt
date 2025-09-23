@@ -148,8 +148,37 @@ abstract class ImplementoBase(
             pendingArticulationLocal = null
         }
 
-        // Passo do implemento (p/ decidir pintar e também orientar a barra)
+        var strokeRightOverride: Pair<Double, Double>? = null
+        // Barra (sempre atualiza)
+        val (barRightX, barRightY) = when (paintModel) {
+            PaintModel.FIXO -> rightX to rightY
+            PaintModel.ARTICULADO -> {
+                val ax = axisX
+                val ay = axisY
+                if (ax != null && ay != null) {
+                    val rx = ay
+                    val ry = -ax
+                    strokeRightOverride = rx to ry
+                    rx to ry
+                } else {
+                    val dx = curImplLocal.x - lastImplLocal.x
+                    val dy = curImplLocal.y - lastImplLocal.y
+                    val d  = hypot(dx, dy)
+                    if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+                }
+            }
+            else -> {
+                val dx = curImplLocal.x - lastImplLocal.x
+                val dy = curImplLocal.y - lastImplLocal.y
+                val d  = hypot(dx, dy)
+                if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+            }
+        }
+
+        // Passo do implemento (p/ decidir pintar)
         val dImpl = hypot(curImplLocal.x - lastImplLocal.x, curImplLocal.y - lastImplLocal.y)
+        val w = getWorkWidthMeters()
+
 
         // Pintura raster só quando rodando
         if (running && !rasterSuspended && dImpl >= EPS_IMPL) {
@@ -158,7 +187,6 @@ abstract class ImplementoBase(
             val lastImpl = GeoPoint(lastImplLL.latitude, lastImplLL.longitude)
             val curImpl  = GeoPoint(curImplLL2.latitude,  curImplLL2.longitude)
 
-            val w = getWorkWidthMeters()
             try {
 
                 rasterEngine.paintStroke(
@@ -166,7 +194,9 @@ abstract class ImplementoBase(
                     current = curImpl,
                     implementWidthMeters = w.toDouble(),
                     activeSectionsMask = 0,   // ou seu bitmask real
-                    rateValue = null
+                    rateValue = null,
+                    strokeRightX = strokeRightOverride?.first,
+                    strokeRightY = strokeRightOverride?.second
                 )
 
             } catch (t: Throwable) {
@@ -174,16 +204,6 @@ abstract class ImplementoBase(
             }
         }
 
-        // Barra (sempre atualiza)
-        val (barRightX, barRightY) = if (paintModel == PaintModel.FIXO) {
-            rightX to rightY
-        } else {
-            val dx = curImplLocal.x - lastImplLocal.x
-            val dy = curImplLocal.y - lastImplLocal.y
-            val d  = hypot(dx, dy)
-            if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
-        }
-        val w = getWorkWidthMeters()
         val half = (w / 2.0).toDouble()
         val p1Local = Coordinate(curImplLocal.x - half * barRightX, curImplLocal.y - half * barRightY)
         val p2Local = Coordinate(curImplLocal.x + half * barRightX, curImplLocal.y + half * barRightY)
@@ -257,13 +277,26 @@ abstract class ImplementoBase(
             }
         }
 
-        val (barRightX, barRightY) = if (paintModel == PaintModel.FIXO) {
-            rightX to rightY
-        } else {
-            val dx = curImplLocal.x - lastImplLocal.x
-            val dy = curImplLocal.y - lastImplLocal.y
-            val dd = hypot(dx, dy)
-            if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+        val (barRightX, barRightY) = when (paintModel) {
+            PaintModel.FIXO -> rightX to rightY
+            PaintModel.ARTICULADO -> {
+                val ax = axisX
+                val ay = axisY
+                if (ax != null && ay != null) {
+                    ay to -ax
+                } else {
+                    val dx = curImplLocal.x - lastImplLocal.x
+                    val dy = curImplLocal.y - lastImplLocal.y
+                    val dd = hypot(dx, dy)
+                    if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+                }
+            }
+            else -> {
+                val dx = curImplLocal.x - lastImplLocal.x
+                val dy = curImplLocal.y - lastImplLocal.y
+                val dd = hypot(dx, dy)
+                if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+            }
         }
 
         val p1Local = Coordinate(curImplLocal.x - half * barRightX, curImplLocal.y - half * barRightY)

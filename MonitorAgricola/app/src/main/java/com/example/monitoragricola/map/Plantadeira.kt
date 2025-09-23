@@ -137,4 +137,17 @@ class Plantadeira(
     }
     private fun Double.format3() = String.format("%.3f", this)
 
+    override fun importRuntimeState(state: RuntimeState?) {
+        super.importRuntimeState(state)
+        if (getPaintModel() != PaintModel.ARTICULADO) return
+
+        val theta = state?.thetaRad ?: return
+        val a = distAntenaArticulacao?.toDouble() ?: return
+        val b = distArticulacaoImplemento?.toDouble() ?: return
+
+        val ax = cos(theta)
+        val ay = sin(theta)
+        rememberArticulationState(a, b, ax, ay)
+    }
+
 }
