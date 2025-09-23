@@ -154,6 +154,7 @@ class MainActivity : AppCompatActivity() {
     private var lastHeading: Float = 0f
 
     private var keptRunningInBackground = false
+    private var navigatingAway = false
     private var mapLoopStarted = false
 
     private var activeImplemento: Implemento? = null
@@ -369,6 +370,7 @@ class MainActivity : AppCompatActivity() {
             .getString("fonteCoordenada", "gps")
 
         val skipRestore = keptRunningInBackground
+        navigatingAway = false
         keptRunningInBackground = false
 
         if (skipRestore) {
@@ -464,7 +466,7 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch { flushRasterSync("onStop") }
 
-        val shouldKeep = isWorking && !isFinishing
+        val shouldKeep = (isWorking || navigatingAway) && !isFinishing
         if (!shouldKeep) {
             positionProvider?.stop()
             simulatorProvider?.stop()
@@ -511,7 +513,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 2) decidir background
-        val keep = isWorking && !isFinishing
+        val keep = (isWorking || navigatingAway) && !isFinishing
         keptRunningInBackground = keep
 
         if (!keep) {
@@ -618,10 +620,19 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun setupButtons() {
-        btnRotas.setOnClickListener { startActivity(Intent(this, RoutesActivity::class.java)) }
+        btnRotas.setOnClickListener {
+            navigatingAway = true
+            startActivity(Intent(this, RoutesActivity::class.java))
+        }
         btnRotas.setOnLongClickListener { mostrarAtalhoRotasAB(btnRotas); true }
-        btnConfig.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
-        btnTrabalhos.setOnClickListener { startActivity(Intent(this, TrabalhosActivity::class.java)) }
+        btnConfig.setOnClickListener {
+            navigatingAway = true
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+        btnTrabalhos.setOnClickListener {
+            navigatingAway = true
+            startActivity(Intent(this, TrabalhosActivity::class.java))
+        }
 
         btnConfig.setOnLongClickListener {
             rasterEngine.setMode(HotVizMode.COBERTURA)
@@ -637,6 +648,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Há um trabalho selecionado. Volte ao modo livre para trocar implemento.", Toast.LENGTH_LONG).show()
                 return@setOnClickListener
             }
+            navigatingAway = true
             startActivity(Intent(this, ImplementosActivity::class.java))
         }
 
@@ -724,8 +736,14 @@ class MainActivity : AppCompatActivity() {
                                     refreshPlayButtonColor()
                                 }
                             }
-                            "Criar novo trabalho" -> startActivity(Intent(this@MainActivity, TrabalhosActivity::class.java))
-                            "Abrir lista de trabalhos" -> startActivity(Intent(this@MainActivity, TrabalhosActivity::class.java))
+                            "Criar novo trabalho" -> {
+                                navigatingAway = true
+                                startActivity(Intent(this@MainActivity, TrabalhosActivity::class.java))
+                            }
+                            "Abrir lista de trabalhos" -> {
+                                navigatingAway = true
+                                startActivity(Intent(this@MainActivity, TrabalhosActivity::class.java))
+                            }
                         }
                     }
                     .show()
