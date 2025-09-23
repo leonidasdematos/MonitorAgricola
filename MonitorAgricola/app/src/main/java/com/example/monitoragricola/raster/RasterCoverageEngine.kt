@@ -770,6 +770,40 @@ class RasterCoverageEngine {
         return q
     }
 
+    private data class LocalFrameTransform(
+        val uFromRx: Double,
+        val uFromRy: Double,
+        val vFromRx: Double,
+        val vFromRy: Double
+    ) {
+        fun baseU(ry: Double): Double = uFromRy * ry
+        fun baseV(ry: Double): Double = vFromRy * ry
+        fun projectU(rx: Double, baseU: Double): Double = uFromRx * rx + baseU
+        fun projectV(rx: Double, baseV: Double): Double = vFromRx * rx + baseV
+    }
+
+    private fun buildLocalFrameTransform(ux: Double, uy: Double, nx: Double, ny: Double): LocalFrameTransform {
+        val det = ux * ny - uy * nx
+        return if (abs(det) >= 1e-9) {
+            val inv = 1.0 / det
+            LocalFrameTransform(
+                ny * inv,
+                -nx * inv,
+                -uy * inv,
+                ux * inv
+            )
+        } else {
+            LocalFrameTransform(
+                ux,
+                uy,
+                nx,
+                ny
+            )
+        }
+    }
+
+
+
 
     private fun rasterizeStripRect(
         x0: Double, y0: Double, ux: Double, uy: Double, nx: Double, ny: Double,
@@ -799,6 +833,7 @@ class RasterCoverageEngine {
         val baseEpsVOuter = if (isTail) 0.20 * res else 0.60 * res
         val tileStride = tileSize
 
+        val transform = buildLocalFrameTransform(ux, uy, nx, ny)
         // Determine which side of the swept strip is the "outer" arc when the vehicle turns.
         // The existing heuristics widen the outer edge slightly to avoid gaps, assuming the
         // width vector is aligned with the direction of travel. When an articulated boom
@@ -835,8 +870,8 @@ class RasterCoverageEngine {
                 val py = tileOriginY + localPy
                 val cy = (py + 0.5) * res
                 val ry = cy - y0
-                val baseU = ry * uy
-                val baseV = ry * ny
+                val baseU = transform.baseU(ry)
+                val baseV = transform.baseV(ry)
                 val rowIndex = localPy * tileStride
 
                 for (localPx in localStartX..localEndX) {
@@ -844,10 +879,10 @@ class RasterCoverageEngine {
                     val cx = (px + 0.5) * res
                     val rx = cx - x0
 
-                    val u = rx * ux + baseU
+                    val u = transform.projectU(rx, baseU)
                     if (u < -epsUStart || u >= d - epsUEnd) continue
 
-                    val v = rx * nx + baseV
+                    val v = transform.projectV(rx, baseV)
                     val enlargePositive = positiveVOuterSign > 0 && v > 0
                     val enlargeNegative = positiveVOuterSign < 0 && v < 0
                     val epsNeg = if (enlargeNegative) baseEpsVOuter else baseEpsVInner
@@ -905,6 +940,8 @@ class RasterCoverageEngine {
         val curStamp: Short = strokeId.toShort()
         val epsV = 0.05 * res
         val tileStride = tileSize
+        val transform = buildLocalFrameTransform(ux, uy, nx, ny)
+
 
         forEachHotTileInBounds(px0, py0, px1, py1) { keyPacked, tile, tileOriginX, tileOriginY, startPx, startPy, endPx, endPy ->
             val localStartX = startPx - tileOriginX
@@ -917,18 +954,18 @@ class RasterCoverageEngine {
                 val py = tileOriginY + localPy
                 val cy = (py + 0.5) * res
                 val ry = cy - y
-                val baseU = ry * uy
-                val baseV = ry * ny
+                val baseU = transform.baseU(ry)
+                val baseV = transform.baseV(ry)
                 val rowIndex = localPy * tileStride
 
                 for (localPx in localStartX..localEndX) {
                     val px = tileOriginX + localPx
                     val cx = (px + 0.5) * res
                     val rx = cx - x
-                    val u = rx * ux + baseU
+                    val u = transform.projectU(rx, baseU)
                     if (u < gapM || u >= gapM + lengthM) continue
 
-                    val v = rx * nx + baseV
+                    val v = transform.projectV(rx, baseV)
                     if (abs(v) > hw + epsV) continue
 
                     val idx = rowIndex + localPx
