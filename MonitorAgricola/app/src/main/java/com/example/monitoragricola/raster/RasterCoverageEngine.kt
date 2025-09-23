@@ -682,7 +682,16 @@ class RasterCoverageEngine {
             px = cx; py = cy
         }
 
-        markFrontMask(p1.x, p1.y, ux, uy, implementWidthMeters, computeFrontLength(implementWidthMeters))
+        markFrontMask(
+            p1.x,
+            p1.y,
+            ux,
+            uy,
+            implementWidthMeters,
+            computeFrontLength(implementWidthMeters),
+            rightX,
+            rightY
+        )
         invalidateDirtyTileBitmaps()
     }
 
@@ -826,8 +835,22 @@ class RasterCoverageEngine {
     }
 
 
-    private fun markFrontMask(x: Double, y: Double, ux: Double, uy: Double, widthM: Double, lengthM: Double) {
-        val nx = -uy; val ny = ux
+    private fun markFrontMask(
+        x: Double,
+        y: Double,
+        ux: Double,
+        uy: Double,
+        widthM: Double,
+        lengthM: Double,
+        rightX: Double,
+        rightY: Double
+    ) {
+        val nLen = hypot(rightX, rightY)
+        val (nx, ny) = if (nLen >= 1e-9) {
+            (rightX / nLen) to (rightY / nLen)
+        } else {
+            (-uy) to ux
+        }
         val hw = widthM * 0.5
         val res = resolutionM; val invRes = 1.0 / res
         val gapM = max(FRONT_GAP_MIN_PX * res, FRONT_GAP_W_FACTOR * widthM)

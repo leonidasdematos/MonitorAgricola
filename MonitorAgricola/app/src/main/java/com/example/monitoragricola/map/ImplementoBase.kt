@@ -164,7 +164,9 @@ abstract class ImplementoBase(
                     val dx = curImplLocal.x - lastImplLocal.x
                     val dy = curImplLocal.y - lastImplLocal.y
                     val d  = hypot(dx, dy)
-                    if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+                    val fallback = if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+                    strokeRightOverride = fallback
+                    fallback
                 }
             }
             else -> {
