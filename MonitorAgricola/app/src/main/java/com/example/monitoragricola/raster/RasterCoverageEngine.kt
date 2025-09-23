@@ -437,46 +437,62 @@ class RasterCoverageEngine {
         val cTx = floor(px.toDouble() / tileSize).toInt()
         val cTy = floor(py.toDouble() / tileSize).toInt()
 
+        val previousHot = HashSet<Long>(hotSet)
         val newHot = HashSet<Long>((2 * tileRadiusHot + 1).let { it * it })
         // Prefetch: chaves que acabaram de entrar ou estão pendentes + anel (r+1)
         val storeRef = store
         val hotPrefetch = if (storeRef != null) LinkedHashSet<TileKey>() else null
+
+        fun processHotTile(tx: Int, ty: Int) {
+            val tileKey = TileKey(tx, ty)
+            val key = tileKey.pack()
+            newHot.add(key)
+            hotSet.add(key)
+
+            val existing = tiles[key]
+            val shouldRetry =
+                existing == null || (storeRef != null && pendingStoreLoads.contains(key))
+
+            // Prefetch dos que entraram no HOT e ainda não estão prontos
+            if (hotPrefetch != null && shouldRetry) {
+                hotPrefetch.add(tileKey)
+            }
+
+            if (!shouldRetry) {
+                return
+            }
+
+            val st = storeRef?.loadTile(tx, ty)
+            if (st != null) {
+                val wasPending = pendingStoreLoads.remove(key)
+                val td = tileFromStore(st, forceMetrics = wasPending)
+                tiles[key] = td
+                dataLru.put(key, td)
+                if (existing == null) {
+                    cntTileAlloc.incrementAndGet()
+                }
+            } else {
+                if (existing == null) {
+                    restoredTotals.add(key)
+                    val td = TileData(tileSize)
+                    tiles[key] = td
+                    dataLru.put(key, td)
+                    cntTileAlloc.incrementAndGet()
+                }
+                pendingStoreLoads.add(key)
+            }
+        }
+
+        coroutineContext.ensureActive()
+        processHotTile(cTx, cTy)
+
         for (dy in -tileRadiusHot..tileRadiusHot) {
             coroutineContext.ensureActive()
             for (dx in -tileRadiusHot..tileRadiusHot) {
                 coroutineContext.ensureActive()
+                if (dx == 0 && dy == 0) continue
                 val tx = cTx + dx; val ty = cTy + dy
-                val key = TileKey(tx, ty).pack()
-                newHot.add(key)
-                val existing = tiles[key]
-                val shouldRetry = existing == null || (storeRef != null && pendingStoreLoads.contains(key))
-
-                // Prefetch dos que entraram no HOT e ainda não estão prontos
-                if (hotPrefetch != null && shouldRetry) {
-                    hotPrefetch.add(TileKey(tx, ty))
-                }
-
-                if (shouldRetry) {
-                    val st = storeRef?.loadTile(tx, ty)
-                    if (st != null) {
-                        val wasPending = pendingStoreLoads.remove(key)
-                        val td = tileFromStore(st, forceMetrics = wasPending)
-                        tiles[key] = td
-                        dataLru.put(key, td)
-                        if (existing == null) {
-                            cntTileAlloc.incrementAndGet()
-                        }
-                    } else {
-                        if (existing == null) {
-                            restoredTotals.add(key)
-                            val td = TileData(tileSize)
-                            tiles[key] = td
-                            dataLru.put(key, td)
-                            cntTileAlloc.incrementAndGet()
-                        }
-                        pendingStoreLoads.add(key)
-                    }
-                }
+                processHotTile(tx, ty)
             }
         }
 
@@ -503,22 +519,11 @@ class RasterCoverageEngine {
             }
         }
 
-        val previousHot = HashSet<Long>(hotSet)
         val removedFromHot = HashSet<Long>()
         for (existing in previousHot) {
             if (!newHot.contains(existing)) {
                 removedFromHot.add(existing)
             }
-        }
-
-        val addedToHot = ArrayList<Long>()
-        for (key in newHot) {
-            if (!previousHot.contains(key)) {
-                addedToHot.add(key)
-            }
-        }
-        if (addedToHot.isNotEmpty()) {
-            hotSet.addAll(addedToHot)
         }
 
         if (removedFromHot.isNotEmpty()) {
@@ -531,7 +536,8 @@ class RasterCoverageEngine {
             for (key in removedFromHot) {
                 coroutineContext.ensureActive()
                 scheduleFlushAndMaybeEvict(key, from = "HOT")
-            }        }
+            }
+        }
         logMem()
         startFlushLoopIfNeeded()
     }
@@ -793,6 +799,32 @@ class RasterCoverageEngine {
         val baseEpsVOuter = if (isTail) 0.20 * res else 0.60 * res
         val tileStride = tileSize
 
+        // Determine which side of the swept strip is the "outer" arc when the vehicle turns.
+        // The existing heuristics widen the outer edge slightly to avoid gaps, assuming the
+        // width vector is aligned with the direction of travel. When an articulated boom
+        // overrides the width vector, that assumption breaks, so map the override back to the
+        // motion frame before applying the widening.
+        val motionRightX = -uy
+        val motionRightY = ux
+        val dotRight = motionRightX * nx + motionRightY * ny
+        val alignThreshold = 1e-6
+        val plusVSideSign = when {
+            dotRight > alignThreshold -> 1
+            dotRight < -alignThreshold -> -1
+            else -> 0
+        }
+        val outerSideSign = when {
+            turnSign > 0 -> -1
+            turnSign < 0 -> 1
+            else -> 0
+        }
+        val positiveVOuterSign = when {
+            outerSideSign == 0 || plusVSideSign == 0 -> 0
+            outerSideSign == plusVSideSign -> 1
+            else -> -1
+        }
+
+
         forEachHotTileInBounds(px0, py0, px1, py1) { keyPacked, tile, tileOriginX, tileOriginY, startPx, startPy, endPx, endPy ->
             val localStartX = startPx - tileOriginX
             val localEndX = endPx - tileOriginX
@@ -816,13 +848,10 @@ class RasterCoverageEngine {
                     if (u < -epsUStart || u >= d - epsUEnd) continue
 
                     val v = rx * nx + baseV
-                    val isOuter = when {
-                        turnSign > 0 && v < 0 -> true
-                        turnSign < 0 && v > 0 -> true
-                        else -> false
-                    }
-                    val epsNeg = if (isOuter && v < 0) baseEpsVOuter else baseEpsVInner
-                    val epsPos = if (isOuter && v > 0) baseEpsVOuter else baseEpsVInner
+                    val enlargePositive = positiveVOuterSign > 0 && v > 0
+                    val enlargeNegative = positiveVOuterSign < 0 && v < 0
+                    val epsNeg = if (enlargeNegative) baseEpsVOuter else baseEpsVInner
+                    val epsPos = if (enlargePositive) baseEpsVOuter else baseEpsVInner
                     if (v < -hw - epsNeg || v > hw + epsPos) continue
 
                     val idx = rowIndex + localPx
