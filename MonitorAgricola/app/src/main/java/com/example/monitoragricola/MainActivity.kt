@@ -125,6 +125,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvSobreposicao: TextView
     private lateinit var btnConfig: ImageButton
     private lateinit var btnLayerToggle: ImageButton
+    private lateinit var btnClearFreeMode: ImageButton
     private lateinit var btnImplementos: ImageButton
     private lateinit var btnLigar: ImageButton
     private lateinit var btnRotas: ImageButton
@@ -179,6 +180,7 @@ class MainActivity : AppCompatActivity() {
     private var mapLoopStarted = false
 
     private var activeImplemento: Implemento? = null
+    private var lastAppliedImplementoSnapshot: ImplementoSnapshot? = null
     private var positionProvider: PositionProvider? = null
     private var simulatorProvider: TractorSimulatorProvider? = null
 
@@ -244,6 +246,7 @@ class MainActivity : AppCompatActivity() {
         rasterLoadingOverlay = findViewById(R.id.rasterLoadingOverlay)
         btnConfig = findViewById(R.id.btnConfigTop)
         btnLayerToggle = findViewById(R.id.btnLayerToggle)
+        btnClearFreeMode = findViewById(R.id.btnClearFreeMode)
         btnLigar = findViewById(R.id.btnLigar)
         btnRotas = findViewById(R.id.btnRotas)
         btnTrabalhos = findViewById(R.id.btnTrabalhos)
@@ -344,11 +347,13 @@ class MainActivity : AppCompatActivity() {
                 ImplementoSelector.clearForce(this@MainActivity)
 
                 ImplementoSelector.currentSnapshot(this@MainActivity)?.let { snap ->
+                    lastAppliedImplementoSnapshot = snap
                     val impl = buildImplementoFromSnapshot(snap)
                     selectImplemento(impl, origin = "manual")
                 } ?: run {
                     activeImplemento?.stop()
                     activeImplemento = null
+                    lastAppliedImplementoSnapshot = null
                     tvImplemento.text = "Nenhum implemento selecionado"
                 }
 
@@ -407,6 +412,8 @@ class MainActivity : AppCompatActivity() {
             // Apenas sincronize UI e mantenha tudo como estava.
             lastWorkingFlag = isWorking
 
+            syncSelectionAfterBackground()
+
             // Providers só se estiverem nulos (caso o SO os tenha matado)
             when (fonte) {
                 "gps", "rtk" -> if (positionProvider == null) checkLocationPermission()
@@ -445,8 +452,10 @@ class MainActivity : AppCompatActivity() {
             tvImplemento.text = "Nenhum implemento selecionado"
             activeImplemento?.stop()
             activeImplemento = null
+            lastAppliedImplementoSnapshot = null
         } else {
             tvImplemento.text = if (hasForced) "Implemento (Job): ${snap.nome}" else "Implemento: ${snap.nome}"
+            lastAppliedImplementoSnapshot = snap
             val impl = buildImplementoFromSnapshot(snap)
 
             // Se estiver forçado por Job, restaure o estado runtime (articulação etc.) ANTES de aplicar
@@ -659,6 +668,23 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
         btnLayerToggle.setOnClickListener { showLayerSelection(it) }
+        ViewCompat.setTooltipText(btnClearFreeMode, getString(R.string.free_mode_clear_button_content_description))
+        btnClearFreeMode.setOnClickListener {
+            if (selectedJobId != null || !::rasterEngine.isInitialized) return@setOnClickListener
+            AlertDialog.Builder(this)
+                .setTitle(R.string.free_mode_clear_confirmation_title)
+                .setMessage(R.string.free_mode_clear_confirmation_message)
+                .setPositiveButton(R.string.free_mode_clear_confirmation_positive) { _, _ ->
+                    clearRasterFromMap()
+                    Toast.makeText(
+                        this,
+                        R.string.free_mode_clear_toast,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                .setNegativeButton(R.string.free_mode_clear_confirmation_negative, null)
+                .show()
+        }
         btnTrabalhos.setOnClickListener {
             navigatingAway = true
             startActivity(Intent(this, TrabalhosActivity::class.java))
@@ -749,19 +775,13 @@ class MainActivity : AppCompatActivity() {
                                     jobManager.finish(job.id, areas.effectiveM2, areas.overlapM2)
                                     rasterEngine.attachStore(freeTileStore)
                                     currentTileStore = freeTileStore
-                                    ImplementoSelector.clearForce(this@MainActivity)
-                                    ImplementosPrefs.clearSelectedJobId(this@MainActivity)
-                                    selectedJobId = null
                                     isWorking = false
                                     persistPlayState()
                                     syncPlayUi()
                                     stopCheckpointLoop()
                                     btnLigar.setImageResource(android.R.drawable.ic_media_play)
+                                    releaseForcedAndApplyManualIfAny()
                                     Toast.makeText(this@MainActivity, "Trabalho finalizado", Toast.LENGTH_SHORT).show()
-                                    refreshJobState()
-                                    refreshJobsButtonColor()
-                                    refreshImplementosButtonColor()
-                                    refreshPlayButtonColor()
                                 }
                             }
                             "Criar novo trabalho" -> {
@@ -1232,6 +1252,7 @@ class MainActivity : AppCompatActivity() {
         selectedJobId = job.id
 
         val impl = buildImplementoFromSnapshot(snap)
+        lastAppliedImplementoSnapshot = snap
         (impl as? ImplementoBase)?.importRuntimeState(app.implementoStateStore.load(job.id))
         selectImplemento(impl, origin = "forced")
     }
@@ -1279,21 +1300,77 @@ class MainActivity : AppCompatActivity() {
 
         val snap = ImplementoSelector.currentSnapshot(this)
         if (snap != null) {
+            lastAppliedImplementoSnapshot = snap
             val impl = buildImplementoFromSnapshot(snap)
             selectImplemento(impl, origin = "manual")
         } else {
             activeImplemento?.stop()
             activeImplemento = null
+            lastAppliedImplementoSnapshot = null
             tvImplemento.text = "Nenhum implemento selecionado"
             map.invalidate()
         }
         refreshJobsButtonColor()
         refreshImplementosButtonColor()
         refreshPlayButtonColor()
+        refreshJobState()
     }
 
     private fun refreshJobsButtonColor() {
         btnTrabalhos.isSelected = ImplementosPrefs.getSelectedJobId(this) != null
+        refreshFreeModeUi()
+    }
+
+    private fun refreshFreeModeUi() {
+        if (!::btnClearFreeMode.isInitialized) return
+        val freeMode = selectedJobId == null
+        btnClearFreeMode.isVisible = freeMode
+        btnClearFreeMode.isEnabled = freeMode
+    }
+
+    private fun syncSelectionAfterBackground() {
+        val persistedJobId = ImplementosPrefs.getSelectedJobId(this)
+        if (persistedJobId != selectedJobId) {
+            if (persistedJobId == null) {
+                releaseForcedAndApplyManualIfAny()
+                currentTileStore = freeTileStore
+                tryRestoreSelectedJobRaster()
+            } else {
+                lifecycleScope.launch {
+                    val job = withContext(Dispatchers.IO) { jobManager.get(persistedJobId) }
+                    if (job != null) {
+                        selectImplementoFromJob(job)
+                        refreshJobsButtonColor()
+                        refreshImplementosButtonColor()
+                        refreshPlayButtonColor()
+                        refreshJobState()
+                        tryRestoreSelectedJobRaster()
+                    } else {
+                        releaseForcedAndApplyManualIfAny()
+                        currentTileStore = freeTileStore
+                        tryRestoreSelectedJobRaster()
+                    }
+                }
+            }
+        } else if (persistedJobId == null) {
+            val snapshot = ImplementoSelector.currentSnapshot(this)
+            if (snapshot != lastAppliedImplementoSnapshot) {
+                if (snapshot != null) {
+                    lastAppliedImplementoSnapshot = snapshot
+                    val impl = buildImplementoFromSnapshot(snapshot)
+                    selectImplemento(impl, origin = "manual")
+                } else if (lastAppliedImplementoSnapshot != null) {
+                    activeImplemento?.stop()
+                    activeImplemento = null
+                    lastAppliedImplementoSnapshot = null
+                    tvImplemento.text = "Nenhum implemento selecionado"
+                    if (::map.isInitialized) {
+                        map.invalidate()
+                    }
+                }
+                refreshImplementosButtonColor()
+            }
+        }
     }
 
     /* ======================= Raster helpers ======================= */
@@ -1825,6 +1902,7 @@ class MainActivity : AppCompatActivity() {
                 val snap = withContext(Dispatchers.IO) { freeTileStore.restore() }
                 rasterSaveMutex.withLock {
                     rasterEngine.attachStore(freeTileStore)
+                    currentTileStore = freeTileStore
                     if (snap != null) {
                         rasterEngine.importSnapshot(snap)
                     } else {

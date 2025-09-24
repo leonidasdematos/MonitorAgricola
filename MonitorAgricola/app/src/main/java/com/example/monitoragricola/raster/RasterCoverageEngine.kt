@@ -1461,25 +1461,32 @@ class RasterCoverageEngine {
             fillTransparent(outPixels, buffer)
             return
         }
+        val counts = tile.count
         val size = tileSize
         forEachBlock(blockSize) { x0, x1, y0, y1, dstIndex ->
             var sum = 0f
-            var count = 0
+            var countCovered = 0
             var y = y0
             while (y < y1) {
                 var idx = y * size + x0
                 for (x in x0 until x1) {
-                    sum += speeds[idx]
-                    count++
+                    if ((counts[idx].toInt() and 0xFF) > 0) {
+                        sum += speeds[idx]
+                        countCovered++
+                    }
                     idx++
                 }
                 y++
             }
-            val avg = if (count > 0) sum / count else 0f
-            val t = (avg / 20f).coerceIn(0f, 1f)
-            val r = (t * 255).toInt()
-            val g = 255 - r
-            buffer[dstIndex] = (0xFF shl 24) or (r shl 16) or (g shl 8) or 0
+            if (countCovered == 0) {
+                buffer[dstIndex] = 0
+            } else {
+                val avg = sum / countCovered
+                val t = (avg / 20f).coerceIn(0f, 1f)
+                val r = (t * 255).toInt()
+                val g = 255 - r
+                buffer[dstIndex] = (0xFF shl 24) or (r shl 16) or (g shl 8)
+            }
         }
     }
 

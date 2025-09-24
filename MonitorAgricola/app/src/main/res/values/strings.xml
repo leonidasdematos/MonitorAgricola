@@ -16,4 +16,10 @@
     <string name="layer_mode_sections">Seções</string>
     <string name="layer_mode_selected">Visualização: %1$s</string>
     <string name="layer_button_content_description_with_value">Camadas do mapa (atual: %1$s)</string>
+    <string name="free_mode_clear_button_content_description">Limpar rastro do modo livre</string>
+    <string name="free_mode_clear_confirmation_title">Limpar rastro do modo livre</string>
+    <string name="free_mode_clear_confirmation_message">Deseja limpar o rastro atual do modo livre?</string>
+    <string name="free_mode_clear_confirmation_positive">Limpar</string>
+    <string name="free_mode_clear_confirmation_negative">Cancelar</string>
+    <string name="free_mode_clear_toast">Rastro do modo livre limpo.</string>
 </resources>

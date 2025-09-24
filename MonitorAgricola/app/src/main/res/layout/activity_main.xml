@@ -194,6 +194,18 @@
                 android:contentDescription="@string/layer_button_content_description"
                 app:tint="@android:color/white" />
 
+            <ImageButton
+                android:id="@+id/btnClearFreeMode"
+                android:layout_width="50dp"
+                android:layout_height="50dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/round_button"
+                android:src="@drawable/outline_clear_24"
+                android:contentDescription="@string/free_mode_clear_button_content_description"
+                android:visibility="gone"
+                app:tint="@android:color/white" />
+
+
         </LinearLayout>
 
         <LinearLayout
