@@ -7,4 +7,13 @@
     <string name="espacamento_hint">Espaçamento (m)</string>
     <string name="start">Iniciar</string>
     <string name="stop">Parar</string>
+    <string name="settings_button_content_description">Configurações</string>
+    <string name="layer_button_content_description">Camadas do mapa</string>
+    <string name="layer_mode_coverage">Cobertura</string>
+    <string name="layer_mode_overlap">Sobreposição</string>
+    <string name="layer_mode_rate">Taxa aplicada</string>
+    <string name="layer_mode_speed">Velocidade de trabalho</string>
+    <string name="layer_mode_sections">Seções</string>
+    <string name="layer_mode_selected">Visualização: %1$s</string>
+    <string name="layer_button_content_description_with_value">Camadas do mapa (atual: %1$s)</string>
 </resources>

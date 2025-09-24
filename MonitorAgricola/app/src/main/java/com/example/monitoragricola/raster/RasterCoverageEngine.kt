@@ -17,6 +17,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 
+private const val OPTIONAL_LAYER_MASK = LAYER_SECTIONS or LAYER_RATE or LAYER_SPEED
+
 private class LongArraySet(initialCapacity: Int = 16) {
     private var keys = LongArray(nextPowerOfTwo(initialCapacity.coerceAtLeast(1)))
     private var states = ByteArray(keys.size)
@@ -317,6 +319,17 @@ class RasterCoverageEngine {
     fun tilesSnapshot(): Set<Map.Entry<Long, TileData>> = tiles.entries.toSet()
 
     fun setMode(mode: HotVizMode) { renderMode = mode; invalidateTiles(); Log.i(TAG_EVT, "setMode=$mode") }
+
+    fun availableLayerMask(): Int {
+        var mask = 0
+        for (tile in tiles.values) {
+            mask = mask or tile.layerMask
+            if (mask and OPTIONAL_LAYER_MASK == OPTIONAL_LAYER_MASK) {
+                break
+            }
+        }
+        return mask
+    }
 
     // >>> Corrigido: medir antes/depois, sem depender do retorno de invalidateAll()
     fun invalidateTiles() {

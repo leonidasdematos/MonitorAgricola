@@ -165,17 +165,36 @@
                 android:textSize="16sp" />
         </LinearLayout>
 
-        <!-- Botão Redondo de Configuração no Canto Superior Direito -->
-        <ImageButton
-            android:id="@+id/btnConfigTop"
-            android:layout_width="50dp"
-            android:layout_height="50dp"
-            android:layout_margin="16dp"
+        <!-- Botões flutuantes no canto superior direito -->
+        <LinearLayout
+            android:id="@+id/topRightActions"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
             android:layout_gravity="top|end"
-            android:background="@drawable/round_button"
-            android:src="@android:drawable/ic_menu_manage"
-            app:tint="@android:color/white"
-            android:contentDescription="Configurações" />
+            android:layout_margin="16dp"
+            android:gravity="center_horizontal"
+            android:orientation="vertical">
+
+            <ImageButton
+                android:id="@+id/btnConfigTop"
+                android:layout_width="50dp"
+                android:layout_height="50dp"
+                android:background="@drawable/round_button"
+                android:src="@android:drawable/ic_menu_manage"
+                android:contentDescription="@string/settings_button_content_description"
+                app:tint="@android:color/white" />
+
+            <ImageButton
+                android:id="@+id/btnLayerToggle"
+                android:layout_width="50dp"
+                android:layout_height="50dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/round_button"
+                android:src="@drawable/outline_layers_24"
+                android:contentDescription="@string/layer_button_content_description"
+                app:tint="@android:color/white" />
+
+        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/bottom_bar"

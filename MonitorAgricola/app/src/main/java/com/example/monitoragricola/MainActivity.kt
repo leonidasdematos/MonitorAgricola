@@ -12,8 +12,10 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.StringRes
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.PopupMenu
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -50,9 +52,12 @@ import android.view.View
 import android.view.WindowManager
 
 // Raster
+import com.example.monitoragricola.raster.HotVizMode
+import com.example.monitoragricola.raster.LAYER_RATE
+import com.example.monitoragricola.raster.LAYER_SECTIONS
+import com.example.monitoragricola.raster.LAYER_SPEED
 import com.example.monitoragricola.raster.RasterCoverageEngine
 import com.example.monitoragricola.raster.RasterCoverageOverlay
-import com.example.monitoragricola.raster.HotVizMode
 import com.example.monitoragricola.raster.TileStore
 import com.example.monitoragricola.raster.store.RoomTileStore
 import com.example.monitoragricola.FREE_MODE_JOB_ID
@@ -119,6 +124,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvArea: TextView
     private lateinit var tvSobreposicao: TextView
     private lateinit var btnConfig: ImageButton
+    private lateinit var btnLayerToggle: ImageButton
     private lateinit var btnImplementos: ImageButton
     private lateinit var btnLigar: ImageButton
     private lateinit var btnRotas: ImageButton
@@ -129,6 +135,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rasterLoadingOverlay: View
     private lateinit var progressSavingRaster: ProgressBar
 
+    private var currentHotVizMode: HotVizMode = HotVizMode.COBERTURA
+
+    private data class LayerOption(
+        val mode: HotVizMode,
+        @StringRes val labelRes: Int,
+        val requiredMask: Int? = null,
+    )
+
+    private val layerOptions = listOf(
+        LayerOption(HotVizMode.COBERTURA, R.string.layer_mode_coverage),
+        LayerOption(HotVizMode.SOBREPOSICAO, R.string.layer_mode_overlap),
+        LayerOption(HotVizMode.TAXA, R.string.layer_mode_rate, LAYER_RATE),
+        LayerOption(HotVizMode.VELOCIDADE, R.string.layer_mode_speed, LAYER_SPEED),
+        LayerOption(HotVizMode.SECOES, R.string.layer_mode_sections, LAYER_SECTIONS),
+    )
 
     private var speedEmaKmh: Double? = null   // filtro exponencial da velocidade
     private var savingOps = 0
@@ -222,6 +243,7 @@ class MainActivity : AppCompatActivity() {
         tvSobreposicao = findViewById(R.id.tvSobreposicao)
         rasterLoadingOverlay = findViewById(R.id.rasterLoadingOverlay)
         btnConfig = findViewById(R.id.btnConfigTop)
+        btnLayerToggle = findViewById(R.id.btnLayerToggle)
         btnLigar = findViewById(R.id.btnLigar)
         btnRotas = findViewById(R.id.btnRotas)
         btnTrabalhos = findViewById(R.id.btnTrabalhos)
@@ -285,11 +307,12 @@ class MainActivity : AppCompatActivity() {
                             rasterEngine.attachStore(freeTileStore)
                         }
 
-                    freeTileStore.clear()
-                    app.clearFreeModeTileStore()
-                    rasterEngine.attachStore(noopTileStore)
+                        freeTileStore.clear()
+                        app.clearFreeModeTileStore()
+                        rasterEngine.attachStore(noopTileStore)
+                        ensureHotVizModeIsAvailable()
+                    }
                 }
-            }
 
 
             if (job == null) {
@@ -341,6 +364,7 @@ class MainActivity : AppCompatActivity() {
                     map.invalidate()
                 }
                 recomposeCoverageMetrics()
+                ensureHotVizModeIsAvailable()
             } else {
                 // reaplica força e cobertura raster (pausado)
                 val selId = selectedJobId!!
@@ -634,15 +658,14 @@ class MainActivity : AppCompatActivity() {
             navigatingAway = true
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        btnLayerToggle.setOnClickListener { showLayerSelection(it) }
         btnTrabalhos.setOnClickListener {
             navigatingAway = true
             startActivity(Intent(this, TrabalhosActivity::class.java))
         }
 
         btnConfig.setOnLongClickListener {
-            rasterEngine.setMode(HotVizMode.COBERTURA)
-            rasterOverlay.invalidateTiles()
-            map.invalidate()
+            setHotLayerMode(HotVizMode.COBERTURA, showFeedback = true)
             true
 
         }
@@ -834,6 +857,99 @@ class MainActivity : AppCompatActivity() {
                 event.action == MotionEvent.ACTION_POINTER_DOWN
             ) disableFollowTemporarily()
             false
+        }
+
+        ensureHotVizModeIsAvailable()
+    }
+
+    private fun availableLayerOptions(mask: Int): List<LayerOption> =
+        layerOptions.filter { option ->
+            option.requiredMask == null || option.requiredMask and mask != 0
+        }
+
+    private fun showLayerSelection(anchor: View) {
+        val mask = rasterEngine.availableLayerMask()
+        val options = availableLayerOptions(mask)
+        if (options.isEmpty()) return
+
+        val popup = PopupMenu(this, anchor)
+        val groupId = 0
+        options.forEachIndexed { index, option ->
+            popup.menu.add(groupId, index, index, getString(option.labelRes)).apply {
+                isCheckable = true
+                isChecked = option.mode == currentHotVizMode
+            }
+        }
+        popup.menu.setGroupCheckable(groupId, true, true)
+        popup.setOnMenuItemClickListener { item ->
+            val option = options.getOrNull(item.itemId)
+            if (option != null) {
+                setHotLayerMode(option.mode, showFeedback = true)
+                true
+            } else {
+                false
+            }
+        }
+        popup.show()
+    }
+
+    private fun setHotLayerMode(mode: HotVizMode, showFeedback: Boolean) {
+        updateLayerButtonContentDescription(mode)
+        if (mode == currentHotVizMode) {
+            if (showFeedback) {
+                showLayerSelectionFeedback(mode)
+            }
+            return
+        }
+
+        currentHotVizMode = mode
+        rasterEngine.setMode(mode)
+        rasterOverlay.invalidateTiles()
+        map.invalidate()
+        if (showFeedback) {
+            showLayerSelectionFeedback(mode)
+        }
+    }
+
+    private fun showLayerSelectionFeedback(mode: HotVizMode) {
+        labelForMode(mode)?.let { labelRes ->
+            Toast.makeText(
+                this,
+                getString(R.string.layer_mode_selected, getString(labelRes)),
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private fun labelForMode(mode: HotVizMode): Int? =
+        layerOptions.firstOrNull { it.mode == mode }?.labelRes
+
+    private fun updateLayerButtonContentDescription(mode: HotVizMode = currentHotVizMode) {
+        if (!::btnLayerToggle.isInitialized) return
+        val labelRes = labelForMode(mode) ?: return
+        val description = getString(
+            R.string.layer_button_content_description_with_value,
+            getString(labelRes)
+        )
+        btnLayerToggle.contentDescription = description
+        ViewCompat.setTooltipText(btnLayerToggle, description)
+    }
+
+    private fun ensureHotVizModeIsAvailable() {
+        if (!::rasterEngine.isInitialized) return
+        val mask = rasterEngine.availableLayerMask()
+        val options = availableLayerOptions(mask)
+        if (options.none { it.mode == currentHotVizMode }) {
+            setHotLayerMode(HotVizMode.COBERTURA, showFeedback = false)
+        } else {
+            updateLayerButtonContentDescription()
+        }
+
+        if (::btnLayerToggle.isInitialized) {
+            val enabled = options.isNotEmpty()
+            btnLayerToggle.isEnabled = enabled
+            btnLayerToggle.isClickable = enabled
+            btnLayerToggle.alpha = if (enabled) 1f else 0.5f
         }
     }
 
@@ -1281,6 +1397,7 @@ class MainActivity : AppCompatActivity() {
                 resumeViewportUpdatesAfterRestore()
                 rasterRestoreJob = null
                 recomposeCoverageMetrics()
+                ensureHotVizModeIsAvailable()
             }
         }
         rasterRestoreJob = job
@@ -1302,7 +1419,7 @@ class MainActivity : AppCompatActivity() {
         app.clearFreeModeTileStore()
         map.invalidate()
         recomposeCoverageMetrics()
-
+        ensureHotVizModeIsAvailable()
     }
 
     /* ======================= UI helpers ======================= */
