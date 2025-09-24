@@ -123,6 +123,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvImplemento: TextView
     private lateinit var tvArea: TextView
     private lateinit var tvSobreposicao: TextView
+    private lateinit var btnFollowTractor: ImageButton
     private lateinit var btnConfig: ImageButton
     private lateinit var btnLayerToggle: ImageButton
     private lateinit var btnClearFreeMode: ImageButton
@@ -161,6 +162,7 @@ class MainActivity : AppCompatActivity() {
 
 
     private var followTractor = true
+    private var followManualDisabled = false
     private val followDelayMs = 8000L
     private val followHandler = Handler(Looper.getMainLooper())
 
@@ -244,6 +246,7 @@ class MainActivity : AppCompatActivity() {
         tvArea = findViewById(R.id.tvArea)
         tvSobreposicao = findViewById(R.id.tvSobreposicao)
         rasterLoadingOverlay = findViewById(R.id.rasterLoadingOverlay)
+        btnFollowTractor = findViewById(R.id.btnFollowTractor)
         btnConfig = findViewById(R.id.btnConfigTop)
         btnLayerToggle = findViewById(R.id.btnLayerToggle)
         btnClearFreeMode = findViewById(R.id.btnClearFreeMode)
@@ -658,6 +661,13 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun setupButtons() {
+        btnFollowTractor.setOnClickListener {
+            if (followTractor && !followManualDisabled) {
+                setFollowEnabledFromUser(false)
+            } else {
+                setFollowEnabledFromUser(true)
+            }
+        }
         btnRotas.setOnClickListener {
             navigatingAway = true
             startActivity(Intent(this, RoutesActivity::class.java))
@@ -880,6 +890,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         ensureHotVizModeIsAvailable()
+        updateFollowButtonState()
     }
 
     private fun availableLayerOptions(mask: Int): List<LayerOption> =
@@ -1573,21 +1584,72 @@ class MainActivity : AppCompatActivity() {
         else                -> "%.0f Ha".format(areaM2 / 10_000.0)
     }
 
+    private fun setFollowEnabledFromUser(enable: Boolean) {
+        if (enable) {
+            followManualDisabled = false
+            followHandler.removeCallbacks(followRunnable)
+            updateFollowState(true, animate = false, forceRecenter = true)
+        } else {
+            followManualDisabled = true
+            followHandler.removeCallbacks(followRunnable)
+            updateFollowState(false)
+        }
+    }
+
+    private fun updateFollowState(
+        enabled: Boolean,
+        animate: Boolean = false,
+        forceRecenter: Boolean = false
+    ) {
+        val previous = followTractor
+        followTractor = enabled
+        updateFollowButtonState()
+        if (enabled && (forceRecenter || previous != enabled)) {
+            recenterOnTractor(animate)
+        }
+    }
+
+    private fun recenterOnTractor(animate: Boolean) {
+        if (!::map.isInitialized || !::tractor.isInitialized) return
+        val target = interpolatedPosition ?: tractor.position
+        if (animate) {
+            map.controller.animateTo(target)
+        } else {
+            map.controller.setCenter(target)
+        }
+        val previous = lastPoint
+        val current = interpolatedPosition ?: tractor.position
+        if (previous != null && current != null) {
+            val heading = calculateBearing(previous, current)
+            map.setMapOrientation(-heading)
+            lastHeading = heading
+        }
+        scheduleViewportUpdate(force = true)
+    }
+
+    private fun updateFollowButtonState() {
+        if (!::btnFollowTractor.isInitialized) return
+        btnFollowTractor.isSelected = followTractor
+        val description = when {
+            followTractor -> getString(R.string.follow_button_content_description_following)
+            followManualDisabled -> getString(R.string.follow_button_content_description_manual_off)
+            else -> getString(R.string.follow_button_content_description_temporarily_off)
+        }
+        btnFollowTractor.contentDescription = description
+        ViewCompat.setTooltipText(btnFollowTractor, description)
+    }
+
+
     private fun disableFollowTemporarily() {
-        followTractor = false
+        if (followManualDisabled) return
         followHandler.removeCallbacks(followRunnable)
         followHandler.postDelayed(followRunnable, followDelayMs)
+        updateFollowState(false)
     }
 
     private val followRunnable = Runnable {
-        followTractor = true
-        lastPoint?.let { last ->
-            interpolatedPosition?.let { current ->
-                val heading = calculateBearing(last, current)
-                map.setMapOrientation(-heading)
-                lastHeading = heading
-            }
-        }
+        if (followManualDisabled) return@Runnable
+        updateFollowState(true, animate = false, forceRecenter = true)
     }
 
     private fun calculateBearing(start: GeoPoint, end: GeoPoint): Float {

@@ -176,9 +176,20 @@
             android:orientation="vertical">
 
             <ImageButton
+                android:id="@+id/btnFollowTractor"
+                android:layout_width="50dp"
+                android:layout_height="50dp"
+                android:background="@drawable/round_button_follow_selector"
+                android:contentDescription="@string/follow_button_content_description_following"
+                android:src="@drawable/outline_my_location_24"
+                app:tint="@android:color/white" />
+
+
+            <ImageButton
                 android:id="@+id/btnConfigTop"
                 android:layout_width="50dp"
                 android:layout_height="50dp"
+                android:layout_marginTop="12dp"
                 android:background="@drawable/round_button"
                 android:src="@android:drawable/ic_menu_manage"
                 android:contentDescription="@string/settings_button_content_description"
