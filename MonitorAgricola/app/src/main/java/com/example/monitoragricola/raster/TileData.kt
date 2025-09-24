@@ -47,6 +47,22 @@ class TileData(
         lastStrokeId = null
     }
 
+    fun cloneForPersistence(): TileData {
+        val clone = TileData(
+            tileSize = tileSize,
+            count = count.copyOf(),
+            sections = sections?.copyOf(),
+            rate = rate?.copyOf(),
+            speed = speed?.copyOf(),
+            lastStrokeId = lastStrokeId?.copyOf(),
+            frontStamp = frontStamp?.copyOf(),
+            layerMask = layerMask
+        )
+        clone.dirty = dirty
+        clone.rev = rev
+        return clone
+    }
+
     /**
      * Número de arrays opcionais atualmente alocados.
      */

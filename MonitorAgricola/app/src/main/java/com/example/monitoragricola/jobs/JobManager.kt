@@ -190,8 +190,12 @@ class JobManager(
                 store.saveDirtyTilesAndClear(dirty)
                 dirty.forEach { it.second.dirty = false }
             }
-            repo.saveRaster(jobId, engine)
+            repo.saveRasterMetadata(jobId, engine)
         }
+
+    suspend fun saveRasterMetadata(jobId: Long, engine: RasterCoverageEngine) =
+        repo.saveRasterMetadata(jobId, engine)
+
 
     /** Remove o raster persistido do job (ao apagar o job, por exemplo). */
     suspend fun deleteRaster(jobId: Long) = repo.deleteRaster(jobId)

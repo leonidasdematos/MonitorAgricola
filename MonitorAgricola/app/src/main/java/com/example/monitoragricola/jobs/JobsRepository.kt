@@ -132,16 +132,8 @@ class JobsRepository(
             rateCountByArea = rateStats.countByArea
         )
     }
-    suspend fun saveRaster(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
+    suspend fun saveRasterMetadata(jobId: Long, engine: com.example.monitoragricola.raster.RasterCoverageEngine) =
         withContext(Dispatchers.IO) {
-            val store = com.example.monitoragricola.raster.store.RoomTileStore(rasterDb, jobId)
-            val dirty = engine.tilesSnapshot().mapNotNull { entry ->
-                val keyPacked = entry.key
-                val tile = entry.value
-                if (tile.dirty) com.example.monitoragricola.raster.TileKey.unpack(keyPacked) to tile else null
-            }
-            store.saveDirtyTilesAndClear(dirty)
-            for ((_, tile) in dirty) tile.dirty = false
 
             val metadata = JobRasterMetadata(
                 jobId = jobId,

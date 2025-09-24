@@ -109,9 +109,9 @@ class MainActivity : AppCompatActivity() {
 
     private val freeTileStore by lazy { RoomTileStore(app.rasterDb, FREE_MODE_JOB_ID, maxCacheTiles = 16) }
     private val noopTileStore = object : TileStore {
-        override  fun loadTile(tx: Int, ty: Int) = null
+        override fun loadTile(tx: Int, ty: Int) = null
         override suspend fun saveDirtyTilesAndClear(list: List<Pair<TileKey, TileData>>) {}
-
+        override fun prefetchTiles(keys: Iterable<TileKey>) { /* no-op */ }
     }
 
 
@@ -307,8 +307,8 @@ class MainActivity : AppCompatActivity() {
                         if (job != null) {
                             val store = RoomTileStore(app.rasterDb, job.id)
                             rasterEngine.attachStore(store)
-                            withSavingIndicator(suspendLoops = true) {
-                                persistRaster(job.id, store)
+                            withSavingIndicator(suspendLoops = true, allowLoopRelease = true) { releaseLoop ->
+                                persistRaster(job.id, store, releaseLoop)
                             }
                             rasterEngine.attachStore(freeTileStore)
                         }
@@ -535,7 +535,7 @@ class MainActivity : AppCompatActivity() {
             val store = currentTileStore
             if (store != null) {
                 val job = lifecycleScope.launch {
-                    withSavingIndicator(suspendLoops = true) {
+                    withSavingIndicator(suspendLoops = true) { _ ->
                         withContext(Dispatchers.IO + NonCancellable) {
                             runCatching { persistRaster(selId, store) }
                         }
@@ -755,8 +755,8 @@ class MainActivity : AppCompatActivity() {
                             "Pausar trabalho" -> active?.let { job ->
                                 lifecycleScope.launch {
                                     currentTileStore?.let { ts ->
-                                        withSavingIndicator(suspendLoops = true) {
-                                            persistRaster(job.id, ts)
+                                        withSavingIndicator(suspendLoops = true, allowLoopRelease = true) { releaseLoop ->
+                                            persistRaster(job.id, ts, releaseLoop)
                                         }
                                     }
                                     jobManager.pause(job.id)
@@ -778,8 +778,8 @@ class MainActivity : AppCompatActivity() {
                                 lifecycleScope.launch {
                                     val areas = rasterEngine.getAreas()
                                     currentTileStore?.let { ts ->
-                                        withSavingIndicator(suspendLoops = true) {
-                                            persistRaster(job.id, ts)
+                                        withSavingIndicator(suspendLoops = true, allowLoopRelease = true) { releaseLoop ->
+                                            persistRaster(job.id, ts, releaseLoop)
                                         }
                                     }
                                     jobManager.finish(job.id, areas.effectiveM2, areas.overlapM2)
@@ -860,8 +860,8 @@ class MainActivity : AppCompatActivity() {
 
                     selId?.let { id ->
                         currentTileStore?.let { ts ->
-                            withSavingIndicator(suspendLoops = true) {
-                                persistRaster(id, ts)
+                            withSavingIndicator(suspendLoops = true, allowLoopRelease = true) { releaseLoop ->
+                                persistRaster(id, ts, releaseLoop)
                             }
                         }
                         withContext(Dispatchers.IO) { jobManager.pause(id) }
@@ -1180,9 +1180,7 @@ class MainActivity : AppCompatActivity() {
                     val id = selectedJobId
                     val store = currentTileStore
                     if (id != null && store != null) {
-                        withSavingIndicator {
-                            persistRaster(id, store)
-                        }
+                        withSavingIndicator(suspendLoops = true) { _ -> persistRaster(id, store) }
                     } else {
                         val snap = rasterEngine.exportSnapshot()
                         freeTileStore.snapshot(snap)
@@ -1989,7 +1987,11 @@ class MainActivity : AppCompatActivity() {
         btnLigar.isSelected = isWorking
     }
 
-    private suspend fun <T> withSavingIndicator(suspendLoops: Boolean = false, block: suspend () -> T): T {
+    private suspend fun <T> withSavingIndicator(
+        suspendLoops: Boolean = false,
+        allowLoopRelease: Boolean = false,
+        block: suspend (releaseLoop: (() -> Unit)?) -> T
+    ): T {
         withContext(Dispatchers.Main) {
             if (suspendLoops) {
                 suspendRasterUpdates++
@@ -1997,19 +1999,32 @@ class MainActivity : AppCompatActivity() {
             savingOps++
             progressSavingRaster.isVisible = savingOps > 0
         }
+        var loopReleased = false
+        val releaseLoop = if (suspendLoops && allowLoopRelease) {
+            {
+                if (!loopReleased) {
+                    loopReleased = true
+                    onSavingFinished(releaseLoop = true, releaseSavingCounter = false)
+                }
+            }
+        } else null
         return try {
-            block()
+            block(releaseLoop)
         } finally {
-            onSavingFinished(suspendLoops)
+            val shouldReleaseLoop = suspendLoops && !loopReleased
+            onSavingFinished(shouldReleaseLoop)
         }
     }
 
-    private fun onSavingFinished(releaseLoop: Boolean) {
+
+    private fun onSavingFinished(releaseLoop: Boolean, releaseSavingCounter: Boolean = true) {
         val release = {
             if (releaseLoop) {
                 suspendRasterUpdates = (suspendRasterUpdates - 1).coerceAtLeast(0)
             }
-            savingOps = (savingOps - 1).coerceAtLeast(0)
+            if (releaseSavingCounter) {
+                savingOps = (savingOps - 1).coerceAtLeast(0)
+            }
             progressSavingRaster.isVisible = savingOps > 0
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -2019,9 +2034,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun persistRaster(jobId: Long, store: TileStore) {
+    private suspend fun persistRaster(
+        jobId: Long,
+        store: TileStore,
+        releaseLoop: (() -> Unit)? = null
+    ) {
+        val copies = mutableListOf<Pair<TileKey, TileData>>()
         rasterSaveMutex.withLock {
-            jobManager.saveRaster(jobId, store, rasterEngine)
+            val snapshot = rasterEngine.tilesSnapshot()
+            for ((packedKey, tile) in snapshot) {
+                if (!tile.dirty) continue
+                val clone = tile.cloneForPersistence()
+                copies += TileKey.unpack(packedKey) to clone
+                tile.dirty = false
+            }
+        }
+
+        jobManager.saveRasterMetadata(jobId, rasterEngine)
+        releaseLoop?.invoke()
+
+        if (copies.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                store.saveDirtyTilesAndClear(copies)
+            }
         }
     }
 
@@ -2042,7 +2077,7 @@ class MainActivity : AppCompatActivity() {
         val store = currentTileStore ?: return
         try {
             // Tempo curto p/ não travar a UI: ajuste se necessário (400–1000 ms)
-            withSavingIndicator(suspendLoops = true) {
+            withSavingIndicator(suspendLoops = true) { _ ->
                 withContext(Dispatchers.IO) {
                     waitForPendingRasterPersistence()
                     withTimeout(800) {
