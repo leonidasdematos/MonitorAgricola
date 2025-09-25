@@ -70,6 +70,9 @@ dependencies {
     // Utilidades
     implementation("com.google.code.gson:gson:2.8.9")
 
+    // Localização
+    implementation("com.google.android.gms:play-services-location:21.2.0")
+
     // Room (runtime + coroutines) + KAPT (compiler)
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
@@ -81,6 +84,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.3")
 
     // Testes
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

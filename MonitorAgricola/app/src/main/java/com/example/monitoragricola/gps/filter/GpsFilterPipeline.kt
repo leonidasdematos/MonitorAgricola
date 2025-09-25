@@ -121,7 +121,7 @@ class GpsFilterPipeline(
                 kalman.reset()
                 headingFilter.reset()
                 stationaryDetector.reset()
-                projection = null
+                //projection = null
             }
             return null
         }

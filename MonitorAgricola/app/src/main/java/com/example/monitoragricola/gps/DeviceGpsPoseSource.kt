@@ -6,7 +6,9 @@ import com.example.monitoragricola.gps.api.IGpsPoseSource
 import com.example.monitoragricola.gps.filter.GpsFilterPipeline
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -26,7 +28,7 @@ class DeviceGpsPoseSource(
     private var started = false
     private var channel: Channel<Location>? = null
     private var scope: CoroutineScope? = null
-    private var processingJob: SupervisorJob? = null
+    private var processingJob: Job? = null
 
     override fun start() {
         if (started) return

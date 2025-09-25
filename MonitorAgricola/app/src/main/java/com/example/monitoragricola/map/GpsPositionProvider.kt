@@ -1,4 +1,4 @@
-package com.example.monitoragricola.map
+/*package com.example.monitoragricola.map
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -50,3 +50,4 @@ class GpsPositionProvider(private val context: Context) : PositionProvider {
     }
 }
 
+*/
