@@ -29,9 +29,14 @@ import com.example.monitoragricola.implementos.ImplementoSelector
 import com.example.monitoragricola.implementos.ImplementosPrefs
 import com.example.monitoragricola.implementos.ImplementoSnapshot
 import com.example.monitoragricola.jobs.JobEventType
+import com.example.monitoragricola.gps.FilteredDevicePositionProvider
+import com.example.monitoragricola.gps.GpsFilterPreferences
+import com.example.monitoragricola.gps.GpsFilterSettings
+import com.example.monitoragricola.gps.api.GpsPose
 import com.example.monitoragricola.map.*
 import com.example.monitoragricola.ui.routes.RoutesActivity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.osmdroid.config.Configuration
@@ -184,7 +189,11 @@ class MainActivity : AppCompatActivity() {
     private var activeImplemento: Implemento? = null
     private var lastAppliedImplementoSnapshot: ImplementoSnapshot? = null
     private var positionProvider: PositionProvider? = null
+    private var filteredDeviceProvider: FilteredDevicePositionProvider? = null
     private var simulatorProvider: TractorSimulatorProvider? = null
+    private var gpsPoseJob: Job? = null
+    private var latestPose: GpsPose? = null
+    private var gpsFilterSettings: GpsFilterSettings = GpsFilterSettings()
 
     private var lastSpeedCalcTime: Long = 0
     private var lastSpeedPoint: GeoPoint? = null
@@ -442,7 +451,7 @@ class MainActivity : AppCompatActivity() {
         lastWorkingFlag = isWorking
 
         // Reset providers/caches (garante estado limpo)
-        positionProvider?.stop(); positionProvider = null
+        clearPositionProvider()
         simulatorProvider?.stop(); simulatorProvider = null
         resetCache()
 
@@ -456,6 +465,7 @@ class MainActivity : AppCompatActivity() {
             activeImplemento?.stop()
             activeImplemento = null
             lastAppliedImplementoSnapshot = null
+            applyImplementToGps(null)
         } else {
             tvImplemento.text = if (hasForced) "Implemento (Job): ${snap.nome}" else "Implemento: ${snap.nome}"
             lastAppliedImplementoSnapshot = snap
@@ -509,7 +519,7 @@ class MainActivity : AppCompatActivity() {
 
         val shouldKeep = (isWorking || navigatingAway) && !isFinishing
         if (!shouldKeep) {
-            positionProvider?.stop()
+            clearPositionProvider()
             simulatorProvider?.stop()
             handler.removeCallbacksAndMessages(null)
             persistPlayState()
@@ -558,7 +568,7 @@ class MainActivity : AppCompatActivity() {
         keptRunningInBackground = keep
 
         if (!keep) {
-            positionProvider?.stop()
+            clearPositionProvider()
             simulatorProvider?.stop()
             handler.removeCallbacksAndMessages(null)
             stopCheckpointLoop()
@@ -1044,7 +1054,9 @@ class MainActivity : AppCompatActivity() {
         handler.post(object : Runnable {
             override fun run() {
                 positionProvider?.getCurrentPosition()?.let { pos ->
-                    lastPositionMillis = System.currentTimeMillis()
+                    val poseSnapshot = latestPose
+                    val now = System.currentTimeMillis()
+                    lastPositionMillis = poseSnapshot?.timestampMillis ?: now
                     if (isSignalLost) {
                         isSignalLost = false
                         lifecycleScope.launch { logSignalEvent(lost = false) }
@@ -1060,8 +1072,7 @@ class MainActivity : AppCompatActivity() {
                     val currentPos = interpolatedPosition!!
                     tractor.position = currentPos
 
-
-                    val now = System.currentTimeMillis()
+                    val headingFromPose = poseSnapshot?.headingDeg?.toFloat()
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
                         val lon = currentPos.longitude
@@ -1095,14 +1106,21 @@ class MainActivity : AppCompatActivity() {
                     implBase?.setRasterSuspended(skipRasterOps)
                     activeImplemento?.updatePosition(lastPoint, currentPos)
 
-                    lastPoint?.let { last ->
-                        val dist = last.distanceToAsDouble(currentPos)
-                        if (dist > 0.01) {
-                            val heading = calculateBearing(last, currentPos)
-                            val diff = ((heading - lastHeading + 540) % 360) - 180
-                            if (abs(diff) > 0.1f && followTractor) {
-                                lastHeading = (lastHeading + diff + 360) % 360
-                                map.setMapOrientation(-lastHeading)
+                    if (headingFromPose != null) {
+                        lastHeading = headingFromPose
+                        if (followTractor) {
+                            map.setMapOrientation(-lastHeading)
+                        }
+                    } else {
+                        lastPoint?.let { last ->
+                            val dist = last.distanceToAsDouble(currentPos)
+                            if (dist > 0.01) {
+                                val heading = calculateBearing(last, currentPos)
+                                val diff = ((heading - lastHeading + 540) % 360) - 180
+                                if (abs(diff) > 0.1f && followTractor) {
+                                    lastHeading = (lastHeading + diff + 360) % 360
+                                    map.setMapOrientation(-lastHeading)
+                                }
                             }
                         }
                     }
@@ -1125,13 +1143,13 @@ class MainActivity : AppCompatActivity() {
                                 lat = currentPos.latitude,
                                 lon = currentPos.longitude,
                                 tMillis = System.currentTimeMillis(),
-                                speedKmh = null,
-                                headingDeg = lastHeading
+                                speedKmh = poseSnapshot?.speedMps?.times(3.6)?.toFloat(),
+                                headingDeg = headingFromPose ?: lastHeading
                             )
                         }
                     }
 
-                    tvVelocidade.text = calcularVelocidadeCache(currentPos)
+                    tvVelocidade.text = calcularVelocidadeCache(currentPos, poseSnapshot)
                     ajustarAmostragemPorVelocidade()
 
                     if (!skipRasterOps) {
@@ -1285,6 +1303,7 @@ class MainActivity : AppCompatActivity() {
 
         activeImplemento?.stop()
         activeImplemento = impl
+        applyImplementToGps(lastAppliedImplementoSnapshot)
 
         // Se veio de Job, garanta que runtime state (articulação) seja importado antes de start/stop
         if (origin == "forced" && selectedJobId != null) {
@@ -1318,6 +1337,7 @@ class MainActivity : AppCompatActivity() {
             lastAppliedImplementoSnapshot = null
             tvImplemento.text = "Nenhum implemento selecionado"
             map.invalidate()
+            applyImplementToGps(null)
         }
         refreshJobsButtonColor()
         refreshImplementosButtonColor()
@@ -1510,7 +1530,18 @@ class MainActivity : AppCompatActivity() {
 
     /* ======================= UI helpers ======================= */
 
-    private fun calcularVelocidadeCache(current: GeoPoint): String {
+    private fun calcularVelocidadeCache(current: GeoPoint, pose: GpsPose?): String {
+        pose?.let {
+            val kmh = (it.speedMps * 3.6).coerceAtLeast(0.0)
+            val alpha = 0.25
+            speedEmaKmh = when (val prev = speedEmaKmh) {
+                null -> kmh
+                else -> prev + alpha * (kmh - prev)
+            }
+            val smoothed = speedEmaKmh ?: kmh
+            rasterEngine.updateSpeed(if (smoothed > 0.0) smoothed.toFloat() else null)
+            return String.format("%.1f km/h", smoothed)
+        }
         val now = System.currentTimeMillis()
         val last = lastSpeedPoint
         val lastTime = lastSpeedCalcTime
@@ -1885,10 +1916,56 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startGpsProvider() {
+        gpsPoseJob?.cancel()
+        gpsPoseJob = null
+        stopDeviceProvider()
         positionProvider?.stop()
-        positionProvider = GpsPositionProvider(this)
-        positionProvider?.start()
+
+        val settings = GpsFilterPreferences.read(this)
+        gpsFilterSettings = settings
+        val provider = FilteredDevicePositionProvider(this, lifecycleScope, settings)
+        filteredDeviceProvider = provider
+        positionProvider = provider
         simulatorProvider = null
+        latestPose = null
+
+        gpsPoseJob = lifecycleScope.launch {
+            provider.poses.collectLatest { pose ->
+                latestPose = pose
+                lastPositionMillis = pose.timestampMillis
+                speedEmaKmh = pose.speedMps * 3.6
+            }
+        }
+        positionProvider?.start()
+        applyImplementToGps(lastAppliedImplementoSnapshot)
+    }
+
+    private fun stopDeviceProvider() {
+        gpsPoseJob?.cancel()
+        gpsPoseJob = null
+        filteredDeviceProvider?.stop()
+        filteredDeviceProvider = null
+        latestPose = null
+    }
+
+    private fun clearPositionProvider() {
+        stopDeviceProvider()
+        positionProvider?.stop()
+        positionProvider = null
+    }
+
+    private fun applyImplementToGps(snapshot: ImplementoSnapshot?) {
+        val provider = filteredDeviceProvider ?: return
+        val settings = gpsFilterSettings
+        val baseLong = settings.antennaToImplementMeters
+        val baseLat = settings.lateralOffsetMeters
+        val longitudinal = snapshot?.let {
+            (it.distanciaAntenaM ?: baseLong.toFloat()) + (it.offsetLongitudinalM ?: 0f)
+        } ?: baseLong.toFloat()
+        val lateral = snapshot?.offsetLateralM ?: baseLat.toFloat()
+        provider.updateOffsets(longitudinal.toDouble(), lateral.toDouble())
+        val articulated = settings.articulatedModeEnabled && (snapshot?.modoRastro?.equals("articulado", true) == true)
+        provider.setArticulatedMode(articulated)
     }
 
     /* ======================= Bits visuais ======================= */
@@ -2130,8 +2207,7 @@ class MainActivity : AppCompatActivity() {
 
         simulatorProvider?.stop()
         simulatorProvider = null
-        positionProvider?.stop()
-        positionProvider = null
+        clearPositionProvider()
 
         if (::map.isInitialized) {
             implementBar?.let {
