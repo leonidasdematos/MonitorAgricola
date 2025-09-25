@@ -55,6 +55,7 @@ import android.graphics.Color
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
+import java.util.Locale
 
 // Raster
 import com.example.monitoragricola.raster.HotVizMode
@@ -125,6 +126,7 @@ class MainActivity : AppCompatActivity() {
 
     /* ======================= UI ======================= */
     private lateinit var tvVelocidade: TextView
+    private lateinit var tvGpsAccuracy: TextView
     private lateinit var tvImplemento: TextView
     private lateinit var tvArea: TextView
     private lateinit var tvSobreposicao: TextView
@@ -251,6 +253,7 @@ class MainActivity : AppCompatActivity() {
 
         map = findViewById(R.id.map)
         tvVelocidade = findViewById(R.id.tvVelocidade)
+        tvGpsAccuracy = findViewById(R.id.tvGpsAccuracy)
         tvImplemento = findViewById(R.id.tvImplemento)
         tvArea = findViewById(R.id.tvArea)
         tvSobreposicao = findViewById(R.id.tvSobreposicao)
@@ -434,6 +437,7 @@ class MainActivity : AppCompatActivity() {
                     positionProvider  = simulatorProvider
                     activeImplemento?.let { simulatorProvider?.setImplemento(it) } // não chama start()
                     positionProvider?.start()
+                    updateGpsAccuracyIndicator(latestPose)
                 }
             }
 
@@ -489,6 +493,7 @@ class MainActivity : AppCompatActivity() {
                 positionProvider  = simulatorProvider
                 activeImplemento?.let { simulatorProvider?.setImplemento(it) } // não chama start()
                 positionProvider?.start()
+                updateGpsAccuracyIndicator(latestPose)
             }
         }
 
@@ -1150,6 +1155,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     tvVelocidade.text = calcularVelocidadeCache(currentPos, poseSnapshot)
+                    updateGpsAccuracyIndicator(poseSnapshot)
                     ajustarAmostragemPorVelocidade()
 
                     if (!skipRasterOps) {
@@ -1584,13 +1590,26 @@ class MainActivity : AppCompatActivity() {
         return String.format("%.1f km/h", vKmhToShow)
     }
 
+    private fun updateGpsAccuracyIndicator(pose: GpsPose?) {
+        val text = when {
+            positionProvider === simulatorProvider -> "GPS: ±0.0 m"
+            pose?.accuracyM != null && pose.accuracyM.isFinite() && pose.accuracyM >= 0.0 -> {
+                val acc = pose.accuracyM
+                String.format(Locale.US, "GPS: ±%.1f m", acc)
+            }
+            else -> "GPS: ±—"
+        }
+        if (::tvGpsAccuracy.isInitialized) {
+            tvGpsAccuracy.text = text
+        }
+    }
+
+
     private fun recomposeCoverageMetrics() {
         val areas = rasterEngine.getAreas()
         tvArea.text = "Área: ${formatArea(areas.effectiveM2)}"
         tvSobreposicao.text = "Sobreposição: ${formatArea(areas.overlapM2)}"
     }
-
-
 
     private fun ajustarAmostragemPorVelocidade() {
         val vKmh = tvVelocidade.text.toString()
@@ -1937,6 +1956,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         positionProvider?.start()
+        updateGpsAccuracyIndicator(latestPose)
         applyImplementToGps(lastAppliedImplementoSnapshot)
     }
 
@@ -1946,12 +1966,14 @@ class MainActivity : AppCompatActivity() {
         filteredDeviceProvider?.stop()
         filteredDeviceProvider = null
         latestPose = null
+        updateGpsAccuracyIndicator(null)
     }
 
     private fun clearPositionProvider() {
         stopDeviceProvider()
         positionProvider?.stop()
         positionProvider = null
+        updateGpsAccuracyIndicator(null)
     }
 
     private fun applyImplementToGps(snapshot: ImplementoSnapshot?) {
