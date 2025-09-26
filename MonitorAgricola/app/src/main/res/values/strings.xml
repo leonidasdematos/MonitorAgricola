@@ -25,4 +25,5 @@
     <string name="follow_button_content_description_following">Seguindo implemento. Toque para liberar o mapa.</string>
     <string name="follow_button_content_description_manual_off">Mapa livre. Toque para voltar a seguir o implemento.</string>
     <string name="follow_button_content_description_temporarily_off">Mapa ajustado manualmente. O mapa voltará a seguir o implemento em instantes.</string>
+    <string name="route_action_button_content_description">Ação rápida da rota</string>
 </resources>

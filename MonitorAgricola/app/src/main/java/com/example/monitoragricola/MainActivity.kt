@@ -1,6 +1,7 @@
 // com/example/monitoragricola/ui/MainActivity.kt
 package com.example.monitoragricola.ui
 
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -15,7 +16,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.PopupMenu
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -29,12 +29,31 @@ import com.example.monitoragricola.implementos.ImplementoSelector
 import com.example.monitoragricola.implementos.ImplementosPrefs
 import com.example.monitoragricola.implementos.ImplementoSnapshot
 import com.example.monitoragricola.jobs.JobEventType
+import com.example.monitoragricola.jobs.routes.RouteDisplayPrefs
+import com.example.monitoragricola.jobs.routes.RouteType
 import com.example.monitoragricola.gps.FilteredDevicePositionProvider
 import com.example.monitoragricola.gps.GpsFilterPreferences
 import com.example.monitoragricola.gps.GpsFilterSettings
 import com.example.monitoragricola.gps.api.GpsPose
 import com.example.monitoragricola.map.*
 import com.example.monitoragricola.ui.routes.RoutesActivity
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ACTION_GENERATE_AB
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ACTION_GENERATE_CURVE
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ACTION_MARK_A
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ACTION_MARK_B
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ACTION_START_TRACK
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ACTION_STOP_TRACK
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_HAS_TRACK
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_IS_RECORDING
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_JOB_ID
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_PENDING_A
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_PENDING_B
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_ROUTE_ACTION
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_ROUTE_RESET
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_ROUTE_TYPE
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.EXTRA_ROUTE_VISIBLE
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ROUTE_TYPE_AB
+import com.example.monitoragricola.ui.routes.RoutesActivity.Companion.ROUTE_TYPE_CURVE
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.sync.Mutex
@@ -55,6 +74,7 @@ import android.graphics.Color
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
+import android.widget.PopupMenu
 import java.util.Locale
 
 // Raster
@@ -138,6 +158,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnLigar: ImageButton
     private lateinit var btnRotas: ImageButton
     private lateinit var btnTrabalhos: ImageButton
+    private lateinit var btnRouteAction: ImageButton
     private lateinit var tvJobState: TextView
     private lateinit var tvLinhaAlvo: TextView
     private lateinit var tvErroLateral: TextView
@@ -223,11 +244,31 @@ class MainActivity : AppCompatActivity() {
     private var implementLink: org.osmdroid.views.overlay.Polyline? = null
     private var refStartSeq: Int? = null
     private var refEndSeq: Int? = null
+    private var routeVisible: Boolean = false
+    private var currentRouteAction: RouteQuickAction = RouteQuickAction.NONE
+    private var routeLoadJob: Job? = null
 
     private var pendingRestore = false
 
+    private enum class RouteQuickAction {
+        NONE,
+        MARK_A,
+        MARK_B,
+        GENERATE_AB,
+        START_TRACK,
+        STOP_TRACK,
+        GENERATE_CURVE
+    }
+
 
     /* ======================= Permissão ======================= */
+    private val routesLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                handleRoutesResult(result.data)
+            }
+        }
+
     private val requestLocationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) startGpsProvider()
@@ -265,6 +306,7 @@ class MainActivity : AppCompatActivity() {
         btnLigar = findViewById(R.id.btnLigar)
         btnRotas = findViewById(R.id.btnRotas)
         btnTrabalhos = findViewById(R.id.btnTrabalhos)
+        btnRouteAction = findViewById(R.id.btnRouteAction)
         tvJobState = findViewById(R.id.tvJobState)
         tvLinhaAlvo = findViewById(R.id.tvLinhaAlvo)
         tvErroLateral = findViewById(R.id.tvErroLateral)
@@ -445,6 +487,7 @@ class MainActivity : AppCompatActivity() {
             refreshJobsButtonColor()
             refreshImplementosButtonColor()
             refreshPlayButtonColor()
+            updateRouteActionButton()
             syncPlayUi() // atualiza ícone/label
             if (!mapLoopStarted) { startMapUpdates(); mapLoopStarted = true }
 
@@ -512,6 +555,7 @@ class MainActivity : AppCompatActivity() {
         refreshJobsButtonColor()
         refreshImplementosButtonColor()
         refreshPlayButtonColor()
+        refreshRouteForCurrentJob()
         syncPlayUi()
     }
 
@@ -685,9 +729,25 @@ class MainActivity : AppCompatActivity() {
         }
         btnRotas.setOnClickListener {
             navigatingAway = true
-            startActivity(Intent(this, RoutesActivity::class.java))
+            val jobId = selectedJobId
+            val isRecording = refStartSeq != null && (refEndSeq == null || (refEndSeq ?: 0) < (refStartSeq ?: 0))
+            val hasTrack = refStartSeq != null && refEndSeq != null && (refEndSeq ?: 0) >= (refStartSeq ?: 0)
+            val visiblePref = if (jobId != null) RouteDisplayPrefs.isVisible(this, jobId) else false
+            val intent = Intent(this, RoutesActivity::class.java).apply {
+                putExtra(EXTRA_JOB_ID, jobId ?: -1L)
+                putExtra(EXTRA_PENDING_A, pendingA != null)
+                putExtra(EXTRA_PENDING_B, pendingB != null)
+                putExtra(EXTRA_IS_RECORDING, isRecording)
+                putExtra(EXTRA_HAS_TRACK, hasTrack)
+                putExtra(EXTRA_ROUTE_VISIBLE, visiblePref)
+            }
+            routesLauncher.launch(intent)
         }
-        btnRotas.setOnLongClickListener { mostrarAtalhoRotasAB(btnRotas); true }
+        btnRotas.setOnLongClickListener {
+            toggleRouteVisibility()
+            true
+        }
+        btnRouteAction.setOnClickListener { performRouteQuickAction() }
         btnConfig.setOnClickListener {
             navigatingAway = true
             startActivity(Intent(this, SettingsActivity::class.java))
@@ -1283,6 +1343,8 @@ class MainActivity : AppCompatActivity() {
         ImplementoSelector.forceFromJob(this, snap)
         ImplementosPrefs.setSelectedJobId(this, job.id)
         selectedJobId = job.id
+        refreshRouteForCurrentJob()
+        updateRouteActionButton()
 
         val impl = buildImplementoFromSnapshot(snap)
         lastAppliedImplementoSnapshot = snap
@@ -1331,6 +1393,7 @@ class MainActivity : AppCompatActivity() {
         ImplementoSelector.clearForce(this)
         ImplementosPrefs.clearSelectedJobId(this)
         selectedJobId = null
+        clearActiveRouteState()
 
         val snap = ImplementoSelector.currentSnapshot(this)
         if (snap != null) {
@@ -1349,6 +1412,7 @@ class MainActivity : AppCompatActivity() {
         refreshImplementosButtonColor()
         refreshPlayButtonColor()
         refreshJobState()
+        updateRouteActionButton()
     }
 
     private fun refreshJobsButtonColor() {
@@ -1758,27 +1822,196 @@ class MainActivity : AppCompatActivity() {
 
     private fun clearResumeExtras() { intent.removeExtra("resume_job_id") }
 
-    /* ======================= Rotas (inalteradas) ======================= */
-    private fun mostrarAtalhoRotasAB(anchor: View) {
-        val popup = android.widget.PopupMenu(this, anchor)
-        popup.menu.add(0, 1, 0, "Marcar ponto A (posição atual)")
-        popup.menu.add(0, 2, 1, "Marcar ponto B (posição atual)")
-        popup.menu.add(0, 3, 2, "Gerar linhas AB")
-        popup.menu.add(0, 4, 3, "Iniciar gravação do trilho (Curva)")
-        popup.menu.add(0, 5, 4, "Parar gravação do trilho")
-        popup.menu.add(0, 6, 5, "Gerar linhas Curvas")
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                1 -> { positionProvider?.getCurrentPosition()?.let { pendingA = it; Toast.makeText(this, "Ponto A marcado", Toast.LENGTH_SHORT).show() }; true }
-                2 -> { positionProvider?.getCurrentPosition()?.let { pendingB = it; Toast.makeText(this, "Ponto B marcado", Toast.LENGTH_SHORT).show() }; true }
-                3 -> { gerarLinhasABComPreferencias(); true }
-                4 -> { iniciarGravacaoTrilho(); true }
-                5 -> { pararGravacaoTrilho(); true }
-                6 -> { gerarLinhasCurvasComPreferencias(); true }
-                else -> false
+    private fun handleRoutesResult(data: Intent?) {
+        data ?: return
+        val jobId = selectedJobId
+        val reset = data.getBooleanExtra(EXTRA_ROUTE_RESET, false)
+        val requestedVisible = data.getBooleanExtra(EXTRA_ROUTE_VISIBLE, routeVisible)
+        val action = data.getStringExtra(EXTRA_ROUTE_ACTION)
+
+        if (jobId != null) {
+            applyRouteVisibility(jobId, requestedVisible)
+        }
+
+        if (reset) {
+            clearActiveRouteState()
+            jobId?.let { RouteDisplayPrefs.setVisible(this, it, false) }
+        }
+
+        when (action) {
+            ACTION_MARK_A -> markRoutePointA()
+            ACTION_MARK_B -> markRoutePointB()
+            ACTION_GENERATE_AB -> gerarLinhasABComPreferencias()
+            ACTION_START_TRACK -> iniciarGravacaoTrilho()
+            ACTION_STOP_TRACK -> pararGravacaoTrilho()
+            ACTION_GENERATE_CURVE -> gerarLinhasCurvasComPreferencias()
+        }
+
+        updateRouteActionButton()
+    }
+
+    private fun toggleRouteVisibility() {
+        val jobId = selectedJobId
+        val route = activeRoute
+        if (jobId == null || route == null) {
+            Toast.makeText(this, "Nenhuma rota ativa para exibir.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val newVisible = !routeVisible
+        applyRouteVisibility(jobId, newVisible)
+        val message = if (newVisible) "Linhas da rota exibidas." else "Linhas da rota ocultadas."
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun applyRouteVisibility(jobId: Long, visible: Boolean) {
+        routeVisible = visible && activeRoute != null
+        routeRenderer?.setVisible(routeVisible)
+        if (!routeVisible) {
+            clearGuidanceLabels()
+        } else {
+            routeRenderer?.reset()
+            val route = activeRoute
+            val current = positionProvider?.getCurrentPosition() ?: lastPoint ?: tractor.position
+            if (route != null) {
+                routeRenderer?.update(route, refCenterWkb, current, route.spacingM.toDouble())
             }
         }
-        popup.show()
+        RouteDisplayPrefs.setVisible(this, jobId, routeVisible)
+    }
+
+    private fun updateRouteActionButton() {
+        val jobId = selectedJobId
+        if (jobId == null) {
+            currentRouteAction = RouteQuickAction.NONE
+            btnRouteAction.visibility = View.GONE
+            return
+        }
+        if (activeRoute != null) {
+            currentRouteAction = RouteQuickAction.NONE
+            btnRouteAction.visibility = View.GONE
+            return
+        }
+
+        val routeType = getSharedPreferences("routes_prefs", MODE_PRIVATE)
+            .getString("route_type", ROUTE_TYPE_AB) ?: ROUTE_TYPE_AB
+
+        currentRouteAction = when (routeType) {
+            ROUTE_TYPE_AB -> when {
+                pendingA == null -> RouteQuickAction.MARK_A
+                pendingB == null -> RouteQuickAction.MARK_B
+                else -> RouteQuickAction.GENERATE_AB
+            }
+            ROUTE_TYPE_CURVE -> when {
+                refStartSeq == null -> RouteQuickAction.START_TRACK
+                refEndSeq == null || (refEndSeq ?: 0) < (refStartSeq ?: 0) -> RouteQuickAction.STOP_TRACK
+                else -> RouteQuickAction.GENERATE_CURVE
+            }
+            else -> RouteQuickAction.NONE
+        }
+
+        if (currentRouteAction == RouteQuickAction.NONE) {
+            btnRouteAction.visibility = View.GONE
+            return
+        }
+
+        val (iconRes, desc) = when (currentRouteAction) {
+            RouteQuickAction.MARK_A -> android.R.drawable.ic_menu_mylocation to "Marcar ponto A"
+            RouteQuickAction.MARK_B -> android.R.drawable.ic_menu_compass to "Marcar ponto B"
+            RouteQuickAction.GENERATE_AB -> android.R.drawable.ic_media_play to "Gerar linhas AB"
+            RouteQuickAction.START_TRACK -> android.R.drawable.ic_media_play to "Iniciar gravação do trilho"
+            RouteQuickAction.STOP_TRACK -> android.R.drawable.ic_media_pause to "Parar gravação do trilho"
+            RouteQuickAction.GENERATE_CURVE -> android.R.drawable.ic_media_play to "Gerar linhas curvas"
+            RouteQuickAction.NONE -> android.R.drawable.ic_input_add to ""
+        }
+        btnRouteAction.visibility = View.VISIBLE
+        btnRouteAction.setImageResource(iconRes)
+        btnRouteAction.contentDescription = desc
+        ViewCompat.setTooltipText(btnRouteAction, desc)
+    }
+
+    private fun performRouteQuickAction() {
+        when (currentRouteAction) {
+            RouteQuickAction.MARK_A -> markRoutePointA()
+            RouteQuickAction.MARK_B -> markRoutePointB()
+            RouteQuickAction.GENERATE_AB -> gerarLinhasABComPreferencias()
+            RouteQuickAction.START_TRACK -> iniciarGravacaoTrilho()
+            RouteQuickAction.STOP_TRACK -> pararGravacaoTrilho()
+            RouteQuickAction.GENERATE_CURVE -> gerarLinhasCurvasComPreferencias()
+            RouteQuickAction.NONE -> Toast.makeText(this, "Nenhuma ação de rota disponível.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun markRoutePointA() {
+        val pos = positionProvider?.getCurrentPosition()
+        if (pos == null) {
+            Toast.makeText(this, "Posição atual indisponível.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingA = pos
+        Toast.makeText(this, "Ponto A marcado", Toast.LENGTH_SHORT).show()
+        updateRouteActionButton()
+    }
+
+    private fun markRoutePointB() {
+        val pos = positionProvider?.getCurrentPosition()
+        if (pos == null) {
+            Toast.makeText(this, "Posição atual indisponível.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingB = pos
+        Toast.makeText(this, "Ponto B marcado", Toast.LENGTH_SHORT).show()
+        updateRouteActionButton()
+    }
+
+    private fun clearActiveRouteState() {
+        activeRoute = null
+        activeRouteId = null
+        refCenterWkb = null
+        routeRenderer?.setVisible(false)
+        routeVisible = false
+        pendingA = null
+        pendingB = null
+        refStartSeq = null
+        refEndSeq = null
+        updateRouteActionButton()
+        clearGuidanceLabels()
+    }
+
+    private fun refreshRouteForCurrentJob() {
+        routeLoadJob?.cancel()
+        val jobId = selectedJobId
+        if (jobId == null) {
+            clearActiveRouteState()
+            return
+        }
+        routeLoadJob = lifecycleScope.launch {
+            val route = withContext(Dispatchers.IO) { app.routesRepository.activeRoutes(jobId).firstOrNull() }
+            activeRoute = route
+            activeRouteId = route?.id
+            refCenterWkb = if (route?.type == RouteType.AB_CURVE) {
+                withContext(Dispatchers.IO) { app.routesManager.loadLines(route.id).firstOrNull { it.idx == 0 }?.wkbLine }
+            } else null
+            if (route != null) {
+                if (routeRenderer == null) {
+                    routeRenderer = com.example.monitoragricola.jobs.routes.RouteRenderer(map)
+                }
+                routeRenderer?.reset()
+                val shouldShow = RouteDisplayPrefs.isVisible(this@MainActivity, jobId)
+                applyRouteVisibility(jobId, shouldShow)
+            } else {
+                activeRouteId = null
+                refCenterWkb = null
+                routeRenderer?.setVisible(false)
+                routeVisible = false
+                clearGuidanceLabels()
+            }
+            updateRouteActionButton()
+        }
+    }
+
+    private fun clearGuidanceLabels() {
+        if (::tvLinhaAlvo.isInitialized) tvLinhaAlvo.text = "Linha: —"
+        if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: —"
     }
 
     private fun gerarLinhasABComPreferencias() {
@@ -1852,6 +2085,10 @@ class MainActivity : AppCompatActivity() {
             positionProvider?.getCurrentPosition()?.let { pos ->
                 routeRenderer?.update(route = activeRoute!!, refLineWkb = null, tractorPos = pos, spacingM = spacing.toDouble())
             }
+            pendingA = null
+            pendingB = null
+            applyRouteVisibility(jobId, true)
+            updateRouteActionButton()
             Toast.makeText(this@MainActivity, "Rota AB criada.", Toast.LENGTH_SHORT).show()
         }
     }
@@ -1863,6 +2100,7 @@ class MainActivity : AppCompatActivity() {
             refStartSeq = start
             refEndSeq = null
             Toast.makeText(this@MainActivity, "Gravação do trilho (seq) iniciada.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
         }
     }
 
@@ -1872,6 +2110,7 @@ class MainActivity : AppCompatActivity() {
             val end = app.jobsRepository.maxSeq(jobId)
             refEndSeq = end
             Toast.makeText(this@MainActivity, "Gravação do trilho (seq) finalizada.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
         }
     }
 
@@ -1922,6 +2161,11 @@ class MainActivity : AppCompatActivity() {
             positionProvider?.getCurrentPosition()?.let { pos ->
                 routeRenderer?.update(route = activeRoute!!, refLineWkb = refCenterWkb, tractorPos = pos, spacingM = spacing)
             }
+
+            refStartSeq = null
+            refEndSeq = null
+            applyRouteVisibility(jobId, true)
+            updateRouteActionButton()
 
             Toast.makeText(this@MainActivity, "Rota CURVA criado.", Toast.LENGTH_SHORT).show()
         }
@@ -2253,6 +2497,8 @@ class MainActivity : AppCompatActivity() {
         routeRenderer = null
         pendingA = null
         pendingB = null
+        routeLoadJob?.cancel()
+        routeLoadJob = null
 
         super.onDestroy()
     }

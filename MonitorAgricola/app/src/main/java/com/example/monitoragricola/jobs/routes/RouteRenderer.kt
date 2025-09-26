@@ -30,6 +30,8 @@ class RouteRenderer(
     //private var headingLine: Polyline? = null       // NEW: seta do heading (na faixa)
 
     private var lastIdx: Int? = null
+    private var visible: Boolean = true
+
 
     /** Atualiza as 3 linhas e elementos visuais e retorna GuidanceState. */
     fun update(
@@ -38,6 +40,7 @@ class RouteRenderer(
         tractorPos: GeoPoint,
         spacingM: Double
     ): GuidanceState? {
+        if (!visible) return null
         return when (route.type) {
             RouteType.AB_STRAIGHT -> updateAB(route, tractorPos, spacingM)
             RouteType.AB_CURVE    -> updateCurve(route, refLineWkb, tractorPos, spacingM)
@@ -160,6 +163,7 @@ class RouteRenderer(
     }
 
     private fun drawPolylines(proj: ProjectionHelper, lines: List<LineString>, activeIndex: Int) {
+        if (!visible) return
         // remove antigas
         polylines.forEach { map.overlays.remove(it) }
 
@@ -291,6 +295,19 @@ class RouteRenderer(
     fun reset() {
         lastIdx = null
     }
+
+    fun setVisible(value: Boolean) {
+        if (visible == value) return
+        visible = value
+        if (!visible) {
+            polylines.forEach { map.overlays.remove(it) }
+            polylines = emptyList()
+            map.invalidate()
+        } else {
+            lastIdx = null
+        }
+    }
+
 
 
 }

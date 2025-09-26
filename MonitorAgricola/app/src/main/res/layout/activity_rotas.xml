@@ -36,6 +36,40 @@
                 android:text="Curva (trilho de referência)"/>
         </RadioGroup>
 
+        <Switch
+            android:id="@+id/swMostrarRotas"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Exibir linhas da rota"
+            android:layout_marginTop="12dp"
+            android:visibility="gone"/>
+
+        <TextView
+            android:id="@+id/tvStatusRota"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="—"
+            android:textColor="#666666"/>
+
+        <Button
+            android:id="@+id/btnAcao"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:drawablePadding="12dp"
+            android:text="Ação"
+            android:enabled="false"/>
+
+        <Button
+            android:id="@+id/btnRedefinir"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Redefinir rota"
+            android:visibility="gone"/>
+
+
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"

@@ -176,6 +176,17 @@
             android:orientation="vertical">
 
             <ImageButton
+                android:id="@+id/btnRouteAction"
+                android:layout_width="50dp"
+                android:layout_height="50dp"
+                android:background="@drawable/round_button"
+                android:src="@android:drawable/ic_input_add"
+                android:contentDescription="@string/route_action_button_content_description"
+                android:visibility="gone"
+                app:tint="@android:color/white" />
+
+
+            <ImageButton
                 android:id="@+id/btnFollowTractor"
                 android:layout_width="50dp"
                 android:layout_height="50dp"
