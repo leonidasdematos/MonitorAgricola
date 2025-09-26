@@ -1915,8 +1915,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         val (iconRes, desc) = when (currentRouteAction) {
-            RouteQuickAction.MARK_A -> android.R.drawable.ic_menu_mylocation to "Marcar ponto A"
-            RouteQuickAction.MARK_B -> android.R.drawable.ic_menu_compass to "Marcar ponto B"
+            RouteQuickAction.MARK_A -> R.drawable.ic_route_mark_a to "Marcar ponto A"
+            RouteQuickAction.MARK_B -> R.drawable.ic_route_mark_b to "Marcar ponto B"
             RouteQuickAction.GENERATE_AB -> android.R.drawable.ic_media_play to "Gerar linhas AB"
             RouteQuickAction.START_TRACK -> android.R.drawable.ic_media_play to "Iniciar gravação do trilho"
             RouteQuickAction.STOP_TRACK -> android.R.drawable.ic_media_pause to "Parar gravação do trilho"
