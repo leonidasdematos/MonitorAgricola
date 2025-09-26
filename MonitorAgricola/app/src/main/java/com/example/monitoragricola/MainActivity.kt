@@ -247,6 +247,8 @@ class MainActivity : AppCompatActivity() {
     private var routeVisible: Boolean = false
     private var currentRouteAction: RouteQuickAction = RouteQuickAction.NONE
     private var routeLoadJob: Job? = null
+    private var isGeneratingAbRoute = false
+    private var isGeneratingCurveRoute = false
 
     private var pendingRestore = false
 
@@ -1865,6 +1867,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyRouteVisibility(jobId: Long, visible: Boolean) {
         routeVisible = visible && activeRoute != null
+        updateRouteButtonSelection()
         routeRenderer?.setVisible(routeVisible)
         if (!routeVisible) {
             clearGuidanceLabels()
@@ -1879,7 +1882,22 @@ class MainActivity : AppCompatActivity() {
         RouteDisplayPrefs.setVisible(this, jobId, routeVisible)
     }
 
+    private fun updateRouteButtonSelection() {
+        if (::btnRotas.isInitialized) {
+            btnRotas.isSelected = routeVisible
+        }
+    }
+
+
     private fun updateRouteActionButton() {
+        if (!::btnRouteAction.isInitialized) return
+
+        if (isGeneratingAbRoute || isGeneratingCurveRoute) {
+            currentRouteAction = RouteQuickAction.NONE
+            btnRouteAction.visibility = View.GONE
+            return
+        }
+
         val jobId = selectedJobId
         if (jobId == null) {
             currentRouteAction = RouteQuickAction.NONE
@@ -1959,8 +1977,21 @@ class MainActivity : AppCompatActivity() {
             return
         }
         pendingB = pos
-        Toast.makeText(this, "Ponto B marcado", Toast.LENGTH_SHORT).show()
-        updateRouteActionButton()
+        val canAutoGenerate = pendingA != null && selectedJobId != null
+        when {
+            canAutoGenerate && isGeneratingAbRoute -> {
+                Toast.makeText(this, "Ponto B marcado. Geração de rota AB já em andamento.", Toast.LENGTH_SHORT).show()
+                updateRouteActionButton()
+            }
+            canAutoGenerate -> {
+                Toast.makeText(this, "Ponto B marcado. Gerando rota AB automaticamente...", Toast.LENGTH_SHORT).show()
+                gerarLinhasABComPreferencias()
+            }
+            else -> {
+                Toast.makeText(this, "Ponto B marcado", Toast.LENGTH_SHORT).show()
+                updateRouteActionButton()
+            }
+        }
     }
 
     private fun clearActiveRouteState() {
@@ -1969,6 +2000,7 @@ class MainActivity : AppCompatActivity() {
         refCenterWkb = null
         routeRenderer?.setVisible(false)
         routeVisible = false
+        updateRouteButtonSelection()
         pendingA = null
         pendingB = null
         refStartSeq = null
@@ -2003,6 +2035,7 @@ class MainActivity : AppCompatActivity() {
                 refCenterWkb = null
                 routeRenderer?.setVisible(false)
                 routeVisible = false
+                updateRouteButtonSelection()
                 clearGuidanceLabels()
             }
             updateRouteActionButton()
@@ -2015,6 +2048,31 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun gerarLinhasABComPreferencias() {
+        val jobId = selectedJobId ?: run {
+            Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
+            return
+        }
+        val pointA = pendingA ?: run {
+            Toast.makeText(this, "Marque o ponto A antes.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
+            return
+        }
+        val pointB = pendingB ?: run {
+            Toast.makeText(this, "Marque o ponto B antes.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
+            return
+        }
+
+        if (isGeneratingAbRoute) {
+            Toast.makeText(this, "Geração de rota AB em andamento.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
+            return
+        }
+
+        isGeneratingAbRoute = true
+        updateRouteActionButton()
+
         val prefs = getSharedPreferences("routes_prefs", MODE_PRIVATE)
         val useCustom = prefs.getBoolean("use_custom_spacing", false)
         val spacing = if (useCustom) {
@@ -2023,7 +2081,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             defaultPassWidthFromImplemento().toFloat()
         }
-        generateABRoute(spacing)
+        generateABRoute(jobId, pointA, pointB, spacing)
     }
 
     private fun defaultPassWidthFromImplemento(): Float {
@@ -2050,15 +2108,9 @@ class MainActivity : AppCompatActivity() {
         return 3.0f
     }
 
-    private fun generateABRoute(spacing: Float) {
-        val jobId = selectedJobId ?: run {
-            Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show(); return
-        }
-        val A = pendingA; val B = pendingB
-        if (A == null || B == null) { Toast.makeText(this, "Marque A e B antes.", Toast.LENGTH_SHORT).show(); return }
-
+    private fun generateABRoute(jobId: Long, pointA: GeoPoint, pointB: GeoPoint, spacing: Float) {
         val bb = map.boundingBox
-        val projTemp = ProjectionHelper(A.latitude, A.longitude)
+        val projTemp = ProjectionHelper(pointA.latitude, pointA.longitude)
         val p1 = projTemp.toLocalMeters(GeoPoint(bb.latSouth, bb.lonWest))
         val p2 = projTemp.toLocalMeters(GeoPoint(bb.latNorth, bb.lonEast))
         val bounds = com.example.monitoragricola.jobs.routes.RouteGenerator.BoundsMeters(
@@ -2066,30 +2118,45 @@ class MainActivity : AppCompatActivity() {
         )
 
         val gen = com.example.monitoragricola.jobs.routes.RouteGenerator()
-        val (route, lines) = gen.generateAB(
-            A.latitude, A.longitude,
-            B.latitude, B.longitude,
-            spacing.toDouble(),
-            bounds
-        )
+        val (route, lines) = try {
+            gen.generateAB(
+                pointA.latitude, pointA.longitude,
+                pointB.latitude, pointB.longitude,
+                spacing.toDouble(),
+                bounds
+            )
+        } catch (t: Throwable) {
+            Log.e("MainActivity", "Erro ao preparar geração AB", t)
+            Toast.makeText(this, "Falha ao preparar rota AB.", Toast.LENGTH_SHORT).show()
+            isGeneratingAbRoute = false
+            updateRouteActionButton()
+            return
+        }
 
         lifecycleScope.launch {
-            val routeId = app.routesManager.createABRoute(jobId, route, lines)
-            activeRouteId = routeId
-            activeRoute = withContext(Dispatchers.IO) {
-                app.routesRepository.activeRoutes(jobId).first { it.id == routeId }
+            try {
+                val routeId = app.routesManager.createABRoute(jobId, route, lines)
+                activeRouteId = routeId
+                activeRoute = withContext(Dispatchers.IO) {
+                    app.routesRepository.activeRoutes(jobId).first { it.id == routeId }
+                }
+                refCenterWkb = null
+                if (routeRenderer == null) routeRenderer = com.example.monitoragricola.jobs.routes.RouteRenderer(map)
+                else routeRenderer?.reset()
+                positionProvider?.getCurrentPosition()?.let { pos ->
+                    routeRenderer?.update(route = activeRoute!!, refLineWkb = null, tractorPos = pos, spacingM = spacing.toDouble())
+                }
+                pendingA = null
+                pendingB = null
+                applyRouteVisibility(jobId, true)
+                Toast.makeText(this@MainActivity, "Rota AB criada automaticamente.", Toast.LENGTH_SHORT).show()
+            } catch (t: Throwable) {
+                Log.e("MainActivity", "Erro ao gerar rota AB", t)
+                Toast.makeText(this@MainActivity, "Falha ao gerar rota AB.", Toast.LENGTH_SHORT).show()
+            } finally {
+                isGeneratingAbRoute = false
+                updateRouteActionButton()
             }
-            refCenterWkb = null
-            if (routeRenderer == null) routeRenderer = com.example.monitoragricola.jobs.routes.RouteRenderer(map)
-            else routeRenderer?.reset()
-            positionProvider?.getCurrentPosition()?.let { pos ->
-                routeRenderer?.update(route = activeRoute!!, refLineWkb = null, tractorPos = pos, spacingM = spacing.toDouble())
-            }
-            pendingA = null
-            pendingB = null
-            applyRouteVisibility(jobId, true)
-            updateRouteActionButton()
-            Toast.makeText(this@MainActivity, "Rota AB criada.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -2109,19 +2176,40 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val end = app.jobsRepository.maxSeq(jobId)
             refEndSeq = end
-            Toast.makeText(this@MainActivity, "Gravação do trilho (seq) finalizada.", Toast.LENGTH_SHORT).show()
-            updateRouteActionButton()
+            val startSeq = refStartSeq
+            val hasValidTrack = startSeq != null && end != null && end >= startSeq
+            if (hasValidTrack) {
+                Toast.makeText(this@MainActivity, "Gravação finalizada. Gerando linhas curvas automaticamente...", Toast.LENGTH_SHORT).show()
+                gerarLinhasCurvasComPreferencias()
+            } else {
+                Toast.makeText(this@MainActivity, "Gravação do trilho (seq) finalizada.", Toast.LENGTH_SHORT).show()
+                updateRouteActionButton()
+            }
         }
     }
 
     private fun gerarLinhasCurvasComPreferencias() {
-        val jobId = selectedJobId ?: run { Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show(); return }
+        val jobId = selectedJobId ?: run {
+            Toast.makeText(this, "Nenhum trabalho ativo.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
+            return
+        }
         val startSeq = refStartSeq
         val endSeq = refEndSeq
         if (startSeq == null || endSeq == null || endSeq < startSeq) {
             Toast.makeText(this, "Grave um trilho (iniciar e parar) antes de gerar.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
             return
         }
+
+        if (isGeneratingCurveRoute) {
+            Toast.makeText(this, "Geração de linhas curvas em andamento.", Toast.LENGTH_SHORT).show()
+            updateRouteActionButton()
+            return
+        }
+
+        isGeneratingCurveRoute = true
+        updateRouteActionButton()
 
         val prefs = getSharedPreferences("routes_prefs", MODE_PRIVATE)
         val useCustom = prefs.getBoolean("use_custom_spacing", false)
@@ -2133,41 +2221,48 @@ class MainActivity : AppCompatActivity() {
         }.coerceAtLeast(0.05)
 
         lifecycleScope.launch {
-            val points = withContext(Dispatchers.IO) { app.jobsRepository.getPointsBetweenSeq(jobId, startSeq, endSeq) }
-            if (points.isNullOrEmpty() || points.size < 2) {
-                withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "Trilho vazio/curto.", Toast.LENGTH_SHORT).show() }
-                return@launch
-            }
+            try {
+                val points = withContext(Dispatchers.IO) { app.jobsRepository.getPointsBetweenSeq(jobId, startSeq, endSeq) }
+                if (points.isNullOrEmpty() || points.size < 2) {
+                    withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "Trilho vazio/curto.", Toast.LENGTH_SHORT).show() }
+                    return@launch
+                }
 
-            val track = points.map { p -> p.lat to p.lon }
-            val generator = com.example.monitoragricola.jobs.routes.CurveRouteGenerator()
-            val (routeBase, lines) = generator.generateFromTrack(
-                trackLatLon = track, spacingM = spacing, simplifyToleranceM = 0.10
-            )
+                val track = points.map { p -> p.lat to p.lon }
+                val generator = com.example.monitoragricola.jobs.routes.CurveRouteGenerator()
+                val (routeBase, lines) = generator.generateFromTrack(
+                    trackLatLon = track, spacingM = spacing, simplifyToleranceM = 0.10
+                )
 
-            val routeId = withContext(Dispatchers.IO) {
-                app.routesManager.createABRoute(jobId, routeBase.copy(jobId = jobId), lines)
-            }
-            activeRouteId = routeId
-            activeRoute = withContext(Dispatchers.IO) {
-                app.routesRepository.activeRoutes(jobId).first { it.id == routeId }
-            }
-            refCenterWkb = withContext(Dispatchers.IO) {
-                app.routesManager.loadLines(routeId).firstOrNull { it.idx == 0 }?.wkbLine
-            }
+                val routeId = withContext(Dispatchers.IO) {
+                    app.routesManager.createABRoute(jobId, routeBase.copy(jobId = jobId), lines)
+                }
+                activeRouteId = routeId
+                activeRoute = withContext(Dispatchers.IO) {
+                    app.routesRepository.activeRoutes(jobId).first { it.id == routeId }
+                }
+                refCenterWkb = withContext(Dispatchers.IO) {
+                    app.routesManager.loadLines(routeId).firstOrNull { it.idx == 0 }?.wkbLine
+                }
 
-            if (routeRenderer == null) routeRenderer = com.example.monitoragricola.jobs.routes.RouteRenderer(map)
-            else routeRenderer?.reset()
-            positionProvider?.getCurrentPosition()?.let { pos ->
-                routeRenderer?.update(route = activeRoute!!, refLineWkb = refCenterWkb, tractorPos = pos, spacingM = spacing)
+                if (routeRenderer == null) routeRenderer = com.example.monitoragricola.jobs.routes.RouteRenderer(map)
+                else routeRenderer?.reset()
+                positionProvider?.getCurrentPosition()?.let { pos ->
+                    routeRenderer?.update(route = activeRoute!!, refLineWkb = refCenterWkb, tractorPos = pos, spacingM = spacing)
+                }
+
+                refStartSeq = null
+                refEndSeq = null
+                applyRouteVisibility(jobId, true)
+
+                Toast.makeText(this@MainActivity, "Rota CURVA criada automaticamente.", Toast.LENGTH_SHORT).show()
+            } catch (t: Throwable) {
+                Log.e("MainActivity", "Erro ao gerar rota curva", t)
+                Toast.makeText(this@MainActivity, "Falha ao gerar rota curva.", Toast.LENGTH_SHORT).show()
+            } finally {
+                isGeneratingCurveRoute = false
+                updateRouteActionButton()
             }
-
-            refStartSeq = null
-            refEndSeq = null
-            applyRouteVisibility(jobId, true)
-            updateRouteActionButton()
-
-            Toast.makeText(this@MainActivity, "Rota CURVA criado.", Toast.LENGTH_SHORT).show()
         }
     }
 
