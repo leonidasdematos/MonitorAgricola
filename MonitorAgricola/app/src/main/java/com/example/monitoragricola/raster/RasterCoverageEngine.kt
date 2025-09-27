@@ -1330,7 +1330,8 @@ class RasterCoverageEngine {
                     val cx = (px + 0.5) * res
                     val rx = cx - x
                     val u = transform.projectU(rx, baseU)
-                    if (u < minU || u >= maxU) continue
+                    if (u < minU || u >= maxU) continue//if (u < gapM || u >= gapM + lengthM) continue
+
 
                     val v = transform.projectV(rx, baseV)
                     if (abs(v) > hw + epsV) continue

@@ -1311,7 +1311,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // Só grava telemetria do job quando estiver trabalhando.
-                    if (!skipRasterOps && isWorking) {
+                    if (isWorking) {
 
                         selectedJobId?.let { id ->
                             jobRecorder.onTick(
