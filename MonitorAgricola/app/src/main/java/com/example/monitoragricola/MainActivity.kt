@@ -1229,11 +1229,14 @@ class MainActivity : AppCompatActivity() {
         startViewportUpdates()
         handler.post(object : Runnable {
             override fun run() {
+                val now = System.currentTimeMillis()
+                val rawFixMillis = filteredDeviceProvider?.lastFixMillis() ?: 0L
                 positionProvider?.getCurrentPosition()?.let { pos ->
                     val poseSnapshot = latestPose
-                    val now = System.currentTimeMillis()
-                    lastPositionMillis = poseSnapshot?.timestampMillis ?: now
-                    if (isSignalLost) {
+                    val poseMillis = poseSnapshot?.timestampMillis
+                    val latestMillis = listOfNotNull(poseMillis, rawFixMillis.takeIf { it > 0L }).maxOrNull()
+                    lastPositionMillis = latestMillis ?: if (lastPositionMillis > 0L) lastPositionMillis else now
+                    if (isSignalLost && rawFixMillis > 0L && (now - rawFixMillis) <= SIGNAL_LOSS_THRESHOLD_MS) {
                         isSignalLost = false
                         lifecycleScope.launch { logSignalEvent(lost = false) }
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
@@ -1311,7 +1314,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // Só grava telemetria do job quando estiver trabalhando.
-                    if (isWorking) {
+                    if (!skipRasterOps && isWorking) {
 
                         selectedJobId?.let { id ->
                             jobRecorder.onTick(
@@ -1351,8 +1354,7 @@ class MainActivity : AppCompatActivity() {
                     lastPoint = currentPos
                 }
 
-                val now = System.currentTimeMillis()
-                if (!isSignalLost && lastPositionMillis > 0 && (now - lastPositionMillis) > SIGNAL_LOSS_THRESHOLD_MS) {
+                if (!isSignalLost && rawFixMillis > 0L && (now - rawFixMillis) > SIGNAL_LOSS_THRESHOLD_MS) {
                     isSignalLost = true
                     lifecycleScope.launch { logSignalEvent(lost = true) }
                     Toast.makeText(this@MainActivity, "Sinal de posição perdido", Toast.LENGTH_SHORT).show()
@@ -1375,8 +1377,11 @@ class MainActivity : AppCompatActivity() {
                     val id = selectedJobId
                     val store = currentTileStore
                     if (id != null && store != null) {
-                        withSavingIndicator(suspendLoops = true) { _ -> persistRaster(id, store) }
-                    } else {
+                        withSavingIndicator(suspendLoops = true, allowLoopRelease = true) { releaseLoop ->
+                            withContext(Dispatchers.Default) {
+                                persistRaster(id, store, releaseLoop)
+                            }
+                        }                    } else {
                         val snap = rasterEngine.exportSnapshot()
                         freeTileStore.snapshot(snap)
                     }

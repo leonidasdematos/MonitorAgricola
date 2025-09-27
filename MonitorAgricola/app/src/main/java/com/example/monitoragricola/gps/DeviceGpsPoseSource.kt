@@ -30,6 +30,9 @@ class DeviceGpsPoseSource(
     private var scope: CoroutineScope? = null
     private var processingJob: Job? = null
 
+    var lastRawFixMillis: Long = 0L
+        private set
+
     override fun start() {
         if (started) return
         started = true
@@ -41,6 +44,7 @@ class DeviceGpsPoseSource(
         channel = localChannel
         processingScope.launch {
             for (location in localChannel) {
+                lastRawFixMillis = location.time
                 val pose = pipeline.process(location)
                 if (pose != null) {
                     if (!_poses.tryEmit(pose)) {
@@ -64,5 +68,6 @@ class DeviceGpsPoseSource(
         processingJob = null
         scope = null
         pipeline.reset()
+        lastRawFixMillis = 0L
     }
 }

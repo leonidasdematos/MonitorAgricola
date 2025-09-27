@@ -3,6 +3,7 @@ package com.example.monitoragricola.gps.filter
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
+import kotlin.math.max
 
 class OutlierGate(
     private val params: Params,
@@ -51,7 +52,8 @@ class OutlierGate(
         val dy = candidate.y - last.y
         val dist = hypot(dx, dy)
 
-        if (dist > params.maxJumpM && dtSec < 1.5) {
+        val maxDist = params.maxJumpM * max(1.0, dtSec / 1.5)
+        if (dist > maxDist) {
             stats.rejectedDistance++
             return false
         }

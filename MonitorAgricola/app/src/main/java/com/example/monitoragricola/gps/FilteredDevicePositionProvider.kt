@@ -68,6 +68,8 @@ class FilteredDevicePositionProvider(
 
     override val poses: Flow<GpsPose> = poseSource.poses
 
+    fun lastFixMillis(): Long = poseSource.lastRawFixMillis
+
     override fun start() {
         if (collectJob != null) return
         poseSource.start()
