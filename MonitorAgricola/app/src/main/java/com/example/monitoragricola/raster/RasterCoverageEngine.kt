@@ -1285,6 +1285,30 @@ class RasterCoverageEngine {
         val tileStride = tileSize
         val transform = buildLocalFrameTransform(ux, uy, nx, ny)
 
+        // When the boom is articulated the lateral vector (nx, ny) is no longer
+        // orthogonal to the motion vector (ux, uy). In that case the front
+        // rectangle becomes a skewed parallelogram and the simple
+        // [gapM, gapM + lengthM) range misses the extreme corners. Compute the
+        // actual u-extent of the rectangle so every corner is included and no
+        // “holes” remain on tight turns.
+        val epsU = 0.05 * res
+        var minCornerU = Double.POSITIVE_INFINITY
+        var maxCornerU = Double.NEGATIVE_INFINITY
+        fun updateCornerU(cx: Double, cy: Double) {
+            val rx = cx - x
+            val ry = cy - y
+            val baseUCorner = transform.baseU(ry)
+            val uCorner = transform.projectU(rx, baseUCorner)
+            if (uCorner < minCornerU) minCornerU = uCorner
+            if (uCorner > maxCornerU) maxCornerU = uCorner
+        }
+        updateCornerU(p00x, p00y)
+        updateCornerU(p01x, p01y)
+        updateCornerU(p10x, p10y)
+        updateCornerU(p11x, p11y)
+        val minU = minCornerU - epsU
+        val maxU = maxCornerU + epsU
+
 
         forEachHotTileInBounds(px0, py0, px1, py1) { keyPacked, tile, tileOriginX, tileOriginY, startPx, startPy, endPx, endPy ->
             val localStartX = startPx - tileOriginX
@@ -1306,7 +1330,7 @@ class RasterCoverageEngine {
                     val cx = (px + 0.5) * res
                     val rx = cx - x
                     val u = transform.projectU(rx, baseU)
-                    if (u < gapM || u >= gapM + lengthM) continue
+                    if (u < minU || u >= maxU) continue
 
                     val v = transform.projectV(rx, baseV)
                     if (abs(v) > hw + epsV) continue
