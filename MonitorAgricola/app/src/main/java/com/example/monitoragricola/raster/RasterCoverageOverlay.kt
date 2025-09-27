@@ -5,6 +5,7 @@ package com.example.monitoragricola.raster
 
 import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Path
 import android.graphics.Paint
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
@@ -21,6 +22,8 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
     private val matrix = Matrix()
     private val srcPts = FloatArray(8)
     private val dstPts = FloatArray(8)
+    private val quadPath = Path()
+
 
     private val gp00 = GeoPoint(0.0, 0.0)
     private val gp10 = GeoPoint(0.0, 0.0)
@@ -44,6 +47,12 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
     }
 
     private fun drawVisibleTiles(canvas: Canvas, projection: Projection, bb: BoundingBox) {
+        val overview = engine.currentOverviewState()
+        if (overview != null) {
+            drawOverview(canvas, projection, overview)
+            return
+        }
+
         val tileSize = engine.currentTileSize()
         val res = engine.currentResolutionM()
         engine.currentProjection() ?: return
@@ -138,5 +147,64 @@ class RasterCoverageOverlay(private val map: MapView, private val engine: Raster
             stride *= 2
         }
         return stride
+    }
+
+    private fun drawOverview(
+        canvas: Canvas,
+        projection: Projection,
+        overview: RasterCoverageEngine.OverviewState
+    ) {
+        val tileSize = engine.currentTileSize()
+        val res = engine.currentResolutionM()
+        engine.currentProjection() ?: return
+
+        val lat0 = engine.currentOriginLat()
+        val lon0 = engine.currentOriginLon()
+        val mPerDegLat = 111_320.0
+        val mPerDegLon = mPerDegLat * cos(Math.toRadians(lat0))
+        val strideTiles = overview.strideTiles
+        val bitmap = overview.bitmap
+        val tileWidth = overview.tileWidth
+        val tileHeight = overview.tileHeight
+
+        paint.style = Paint.Style.FILL
+
+        for (row in 0 until bitmap.height) {
+            val tilesY = min(strideTiles, tileHeight - row * strideTiles).coerceAtLeast(0)
+            if (tilesY <= 0) continue
+            val baseTy = overview.tileMinY + row * strideTiles
+            val y0m = baseTy * tileSize * res
+            val y1m = (baseTy + tilesY) * tileSize * res
+
+            for (col in 0 until bitmap.width) {
+                val color = bitmap.getPixel(col, row)
+                if (color == 0) continue
+                val tilesX = min(strideTiles, tileWidth - col * strideTiles).coerceAtLeast(0)
+                if (tilesX <= 0) continue
+                val baseTx = overview.tileMinX + col * strideTiles
+                val x0m = baseTx * tileSize * res
+                val x1m = (baseTx + tilesX) * tileSize * res
+
+                localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x0m, y0m, gp00)
+                localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x1m, y0m, gp10)
+                localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x1m, y1m, gp11)
+                localToGeo(lat0, lon0, mPerDegLat, mPerDegLon, x0m, y1m, gp01)
+
+                projection.toPixels(gp00, p00)
+                projection.toPixels(gp10, p10)
+                projection.toPixels(gp11, p11)
+                projection.toPixels(gp01, p01)
+
+                quadPath.reset()
+                quadPath.moveTo(p00.x.toFloat(), p00.y.toFloat())
+                quadPath.lineTo(p10.x.toFloat(), p10.y.toFloat())
+                quadPath.lineTo(p11.x.toFloat(), p11.y.toFloat())
+                quadPath.lineTo(p01.x.toFloat(), p01.y.toFloat())
+                quadPath.close()
+
+                paint.color = color
+                canvas.drawPath(quadPath, paint)
+            }
+        }
     }
 }

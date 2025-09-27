@@ -152,6 +152,9 @@ const val FLUSH_QUEUE_SOFT_LIMIT = 128
 const val FLUSH_BATCH_MAX = 512
 const val FLUSH_WORKERS = 2
 
+private const val MAX_VIZ_TILES = 256
+
+
 class RasterCoverageEngine {
     // ===== Config =====
     private var resolutionM: Double = 0.10
@@ -232,6 +235,10 @@ class RasterCoverageEngine {
     @Volatile
     private var renderBuf: IntArray = IntArray(tileSize * tileSize)
 
+    @Volatile
+    private var overviewState: OverviewState? = null
+    private var overviewBitmap: Bitmap? = null
+
 
     private var lastMemLogNs = 0L
     private var lastSavedLogged = 0L
@@ -253,6 +260,267 @@ class RasterCoverageEngine {
             renderBuf = IntArray(needed)
         }
     }
+
+    private fun clearOverviewState() {
+        overviewState = null
+    }
+
+    private fun obtainOverviewBitmap(width: Int, height: Int): Bitmap {
+        val existing = overviewBitmap
+        if (existing != null && !existing.isRecycled && existing.width == width && existing.height == height) {
+            cntBmpReuse.incrementAndGet()
+            return existing
+        }
+        if (existing != null && !existing.isRecycled) {
+            existing.recycle()
+            cntBmpFree.incrementAndGet()
+        }
+        val (bmp, reused) = BitmapLRU.obtain(width, height)
+        if (reused) {
+            cntBmpReuse.incrementAndGet()
+        } else {
+            cntBmpAlloc.incrementAndGet()
+        }
+        overviewBitmap = bmp
+        return bmp
+    }
+
+    private fun computeOverviewStride(tileCountX: Int, tileCountY: Int): Int {
+        if (tileCountX <= 0 || tileCountY <= 0) return 1
+        var stride = 1
+        while (ceil(tileCountX.toDouble() / stride) * ceil(tileCountY.toDouble() / stride) > MAX_VIZ_TILES) {
+            stride++
+        }
+        return stride
+    }
+
+    private suspend fun renderOverview(bb: BoundingBox, strideTiles: Int): OverviewState? {
+        coroutineContext.ensureActive()
+        val proj = projection ?: return null
+        coroutineContext.ensureActive()
+        val p1 = proj.toLocalMeters(bb.latSouth, bb.lonWest)
+        val p2 = proj.toLocalMeters(bb.latNorth, bb.lonEast)
+        val minX = floor(min(p1.x, p2.x) / resolutionM).toInt()
+        val maxX = ceil(max(p1.x, p2.x) / resolutionM).toInt()
+        val minY = floor(min(p1.y, p2.y) / resolutionM).toInt()
+        val maxY = ceil(max(p1.y, p2.y) / resolutionM).toInt()
+        val tMinX = floor(minX.toDouble() / tileSize).toInt()
+        val tMaxX = floor((maxX - 1).toDouble() / tileSize).toInt()
+        val tMinY = floor(minY.toDouble() / tileSize).toInt()
+        val tMaxY = floor((maxY - 1).toDouble() / tileSize).toInt()
+
+        val tileCountX = (tMaxX - tMinX + 1).coerceAtLeast(0)
+        val tileCountY = (tMaxY - tMinY + 1).coerceAtLeast(0)
+        if (tileCountX == 0 || tileCountY == 0) {
+            clearOverviewState()
+            return null
+        }
+
+        val stride = strideTiles.coerceAtLeast(1)
+        val width = ((tileCountX + stride - 1) / stride).coerceAtLeast(1)
+        val height = ((tileCountY + stride - 1) / stride).coerceAtLeast(1)
+        val totalCells = width * height
+        ensureRenderBufferCapacity(totalCells)
+
+        val coverageMax = if (renderMode == HotVizMode.COBERTURA || renderMode == HotVizMode.SOBREPOSICAO) IntArray(totalCells) else null
+        val rateSum = if (renderMode == HotVizMode.TAXA) DoubleArray(totalCells) else null
+        val rateCount = if (renderMode == HotVizMode.TAXA) IntArray(totalCells) else null
+        val speedSum = if (renderMode == HotVizMode.VELOCIDADE) DoubleArray(totalCells) else null
+        val speedCount = if (renderMode == HotVizMode.VELOCIDADE) IntArray(totalCells) else null
+        val sectionMask = if (renderMode == HotVizMode.SECOES) IntArray(totalCells) else null
+
+        val storeRef = store
+        val prefetch = if (storeRef != null) ArrayList<TileKey>() else null
+        if (prefetch != null) {
+            for (ty in tMinY..tMaxY) {
+                coroutineContext.ensureActive()
+                for (tx in tMinX..tMaxX) {
+                    val keyPacked = TileKey(tx, ty).pack()
+                    if (!tiles.containsKey(keyPacked)) {
+                        prefetch.add(TileKey(tx, ty))
+                    }
+                }
+            }
+        }
+        if (prefetch != null && prefetch.isNotEmpty()) {
+            coroutineContext.ensureActive()
+            withContext(Dispatchers.Default) { storeRef?.prefetchTiles(prefetch) }
+        }
+
+        for (ty in tMinY..tMaxY) {
+            coroutineContext.ensureActive()
+            val cellY = ((ty - tMinY) / stride).coerceIn(0, height - 1)
+            for (tx in tMinX..tMaxX) {
+                coroutineContext.ensureActive()
+                val cellX = ((tx - tMinX) / stride).coerceIn(0, width - 1)
+                val cellIndex = cellY * width + cellX
+                val keyPacked = TileKey(tx, ty).pack()
+                val tile = tiles[keyPacked]
+                val counts: ByteArray
+                val sectionsArr: IntArray?
+                val rateArr: FloatArray?
+                val speedArr: FloatArray?
+                if (tile != null) {
+                    counts = tile.count
+                    sectionsArr = tile.sections
+                    rateArr = tile.rate
+                    speedArr = tile.speed
+                } else {
+                    val st = storeRef?.loadTile(tx, ty) ?: continue
+                    counts = st.count
+                    sectionsArr = st.sections
+                    rateArr = st.rate
+                    speedArr = st.speed
+                }
+
+                when (renderMode) {
+                    HotVizMode.COBERTURA -> {
+                        var maxCount = 0
+                        for (value in counts) {
+                            val c = value.toInt() and 0xFF
+                            if (c > maxCount) maxCount = c
+                        }
+                        val arr = coverageMax!!
+                        if (maxCount > arr[cellIndex]) arr[cellIndex] = maxCount
+                    }
+                    HotVizMode.SOBREPOSICAO -> {
+                        var overlap = false
+                        for (value in counts) {
+                            if ((value.toInt() and 0xFF) > 1) { overlap = true; break }
+                        }
+                        if (overlap) {
+                            coverageMax!![cellIndex] = 2
+                        }
+                    }
+                    HotVizMode.TAXA -> {
+                        val rates = rateArr ?: continue
+                        var sum = 0.0
+                        for (value in rates) {
+                            sum += value.toDouble()
+                        }
+                        rateSum!![cellIndex] += sum
+                        rateCount!![cellIndex] += rates.size
+                    }
+                    HotVizMode.VELOCIDADE -> {
+                        val speeds = speedArr ?: continue
+                        var covered = 0
+                        var sum = 0.0
+                        var idx = 0
+                        while (idx < speeds.size) {
+                            val c = counts[idx].toInt() and 0xFF
+                            if (c > 0) {
+                                sum += speeds[idx].toDouble()
+                                covered++
+                            }
+                            idx++
+                        }
+                        if (covered > 0) {
+                            speedSum!![cellIndex] += sum
+                            speedCount!![cellIndex] += covered
+                        }
+                    }
+                    HotVizMode.SECOES -> {
+                        val sections = sectionsArr ?: continue
+                        var mask = 0
+                        for (value in sections) {
+                            mask = mask or value
+                        }
+                        val arr = sectionMask!!
+                        arr[cellIndex] = arr[cellIndex] or mask
+                    }
+                }
+            }
+        }
+
+        val buffer = renderBuf
+        when (renderMode) {
+            HotVizMode.COBERTURA -> {
+                val arr = coverageMax ?: IntArray(totalCells)
+                var i = 0
+                while (i < totalCells) {
+                    val maxCount = arr[i]
+                    buffer[i] = when {
+                        maxCount <= 0 -> 0
+                        maxCount == 1 -> 0x8022AA22.toInt()
+                        else -> 0xCCFF2222.toInt()
+                    }
+                    i++
+                }
+            }
+            HotVizMode.SOBREPOSICAO -> {
+                val arr = coverageMax ?: IntArray(totalCells)
+                var i = 0
+                while (i < totalCells) {
+                    buffer[i] = if (arr[i] > 1) 0xCCFF2222.toInt() else 0
+                    i++
+                }
+            }
+            HotVizMode.TAXA -> {
+                val sums = rateSum ?: DoubleArray(totalCells)
+                val counts = rateCount ?: IntArray(totalCells)
+                var i = 0
+                while (i < totalCells) {
+                    val count = counts[i]
+                    if (count == 0) {
+                        buffer[i] = 0
+                    } else {
+                        val avg = (sums[i] / count).toFloat()
+                        val t = (avg / 100f).coerceIn(0f, 1f)
+                        val g = (t * 255).toInt()
+                        val b = 255 - g
+                        buffer[i] = (0xFF shl 24) or (0 shl 16) or (g shl 8) or b
+                    }
+                    i++
+                }
+            }
+            HotVizMode.VELOCIDADE -> {
+                val sums = speedSum ?: DoubleArray(totalCells)
+                val counts = speedCount ?: IntArray(totalCells)
+                var i = 0
+                while (i < totalCells) {
+                    val count = counts[i]
+                    if (count == 0) {
+                        buffer[i] = 0
+                    } else {
+                        val avg = (sums[i] / count).toFloat()
+                        val t = (avg / 20f).coerceIn(0f, 1f)
+                        val r = (t * 255).toInt()
+                        val g = 255 - r
+                        buffer[i] = (0xFF shl 24) or (r shl 16) or (g shl 8)
+                    }
+                    i++
+                }
+            }
+            HotVizMode.SECOES -> {
+                val masks = sectionMask ?: IntArray(totalCells)
+                var i = 0
+                while (i < totalCells) {
+                    val mask = masks[i]
+                    val color = when {
+                        mask == 0 -> 0
+                        mask and 1 != 0 -> 0xFF0066FF.toInt()
+                        mask and 2 != 0 -> 0xFF00CC66.toInt()
+                        mask and 4 != 0 -> 0xFFFFBB00.toInt()
+                        else -> 0xFF999999.toInt()
+                    }
+                    buffer[i] = color
+                    i++
+                }
+            }
+        }
+
+        val bitmap = obtainOverviewBitmap(width, height)
+        uploadRenderBuffer(buffer, bitmap, width, height)
+        return OverviewState(
+            tileMinX = tMinX,
+            tileMinY = tMinY,
+            tileWidth = tileCountX,
+            tileHeight = tileCountY,
+            strideTiles = stride,
+            bitmap = bitmap
+        )
+    }
+
 
 
     data class DebugStats(
@@ -318,6 +586,17 @@ class RasterCoverageEngine {
 
     fun tilesSnapshot(): Set<Map.Entry<Long, TileData>> = tiles.entries.toSet()
 
+    data class OverviewState(
+        val tileMinX: Int,
+        val tileMinY: Int,
+        val tileWidth: Int,
+        val tileHeight: Int,
+        val strideTiles: Int,
+        val bitmap: Bitmap
+    )
+
+    fun currentOverviewState(): OverviewState? = overviewState
+
     fun setMode(mode: HotVizMode) { renderMode = mode; invalidateTiles(); Log.i(TAG_EVT, "setMode=$mode") }
 
     fun availableLayerMask(): Int {
@@ -358,6 +637,14 @@ class RasterCoverageEngine {
     fun clearCoverage() {
         val removed = tiles.size
         tiles.clear(); hotSet.clear(); vizSet.clear(); dataLru.clear(); pendingStoreLoads.clear()
+        overviewState = null
+        overviewBitmap?.let {
+            if (!it.isRecycled) {
+                it.recycle()
+                cntBmpFree.incrementAndGet()
+            }
+        }
+        overviewBitmap = null
 
         // >>> Corrigido: medir antes/depois, sem depender do retorno
         val before = bmpLru.size()
@@ -571,7 +858,35 @@ class RasterCoverageEngine {
         val tMinY = floor(minY.toDouble() / tileSize).toInt()
         val tMaxY = floor((maxY - 1).toDouble() / tileSize).toInt()
 
-        val newViz = HashSet<Long>((tMaxX - tMinX + 1) * (tMaxY - tMinY + 1))
+        val tileCountX = (tMaxX - tMinX + 1).coerceAtLeast(0)
+        val tileCountY = (tMaxY - tMinY + 1).coerceAtLeast(0)
+        val estimatedTiles = tileCountX * tileCountY
+
+        if (estimatedTiles > MAX_VIZ_TILES) {
+            val strideTiles = computeOverviewStride(tileCountX, tileCountY)
+            val overview = renderOverview(bb, strideTiles)
+            if (overview != null) {
+                overviewState = overview
+                val removedFromViz = HashSet<Long>(vizSet)
+                vizSet.clear()
+                coroutineContext.ensureActive()
+                for (key in removedFromViz) {
+                    coroutineContext.ensureActive()
+                    scheduleFlushAndMaybeEvict(key, from = "VIZ")
+                }
+                if (removedFromViz.isNotEmpty()) {
+                    Log.d(TAG_Q, "VIZ move: removed=${removedFromViz.size} qNow=${flushQueue.size} pending=${pendingFlush.size}")
+                }
+                startFlushLoopIfNeeded()
+                return
+            } else {
+                clearOverviewState()
+            }
+        } else if (overviewState != null) {
+            clearOverviewState()
+        }
+
+        val newViz = HashSet<Long>(estimatedTiles)
         val storeRef = store
         // Prefetch: tudo que acabou de entrar em VIZ e ainda não está pronto
         val vizPrefetch = if (storeRef != null) LinkedHashSet<TileKey>() else null

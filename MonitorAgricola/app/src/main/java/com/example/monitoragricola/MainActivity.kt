@@ -214,6 +214,7 @@ class MainActivity : AppCompatActivity() {
     private var positionProvider: PositionProvider? = null
     private var filteredDeviceProvider: FilteredDevicePositionProvider? = null
     private var simulatorProvider: TractorSimulatorProvider? = null
+    private var lastPositionSource: String? = null
     private var gpsPoseJob: Job? = null
     private var latestPose: GpsPose? = null
     private var gpsFilterSettings: GpsFilterSettings = GpsFilterSettings()
@@ -473,22 +474,14 @@ class MainActivity : AppCompatActivity() {
 
             syncSelectionAfterBackground()
 
-            // Providers só se estiverem nulos (caso o SO os tenha matado)
-            when (fonte) {
-                "gps", "rtk" -> if (positionProvider == null) checkLocationPermission()
-                "simulador" -> if (positionProvider == null) {
-                    simulatorProvider = TractorSimulatorProvider(map, tractor)
-                    positionProvider  = simulatorProvider
-                    activeImplemento?.let { simulatorProvider?.setImplemento(it) } // não chama start()
-                    positionProvider?.start()
-                    updateGpsAccuracyIndicator(latestPose)
-                }
-            }
+            configurePositionSource(fonte)
+
 
             // UI
             refreshJobsButtonColor()
             refreshImplementosButtonColor()
             refreshPlayButtonColor()
+            refreshRouteForCurrentJob()
             updateRouteActionButton()
             syncPlayUi() // atualiza ícone/label
             if (!mapLoopStarted) { startMapUpdates(); mapLoopStarted = true }
@@ -531,16 +524,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Fonte de posição
-        when (fonte) {
-            "gps", "rtk" -> checkLocationPermission()
-            "simulador" -> {
-                simulatorProvider = TractorSimulatorProvider(map, tractor)
-                positionProvider  = simulatorProvider
-                activeImplemento?.let { simulatorProvider?.setImplemento(it) } // não chama start()
-                positionProvider?.start()
-                updateGpsAccuracyIndicator(latestPose)
-            }
-        }
+        configurePositionSource(fonte, force = true)
+
 
         // Restore do raster quando o mapa estiver pronto
         if (mapReady) {
@@ -2267,6 +2252,49 @@ class MainActivity : AppCompatActivity() {
     }
 
     /* ======================= Permissão / providers ======================= */
+
+    private fun configurePositionSource(source: String?, force: Boolean = false) {
+        val normalized = when (source?.lowercase(Locale.ROOT)) {
+            "simulador" -> "simulador"
+            "rtk" -> "rtk"
+            else -> "gps"
+        }
+
+        val needsReconfigure = force ||
+                lastPositionSource == null ||
+                positionProvider == null ||
+                normalized != lastPositionSource ||
+                (normalized == "simulador" && positionProvider !== simulatorProvider) ||
+                (normalized != "simulador" && positionProvider === simulatorProvider)
+
+        if (!needsReconfigure) {
+            lastPositionSource = normalized
+            return
+        }
+
+        simulatorProvider?.stop()
+        if (normalized != "simulador") {
+            simulatorProvider = null
+        }
+
+        clearPositionProvider()
+
+        when (normalized) {
+            "simulador" -> {
+                simulatorProvider = TractorSimulatorProvider(map, tractor)
+                positionProvider = simulatorProvider
+                activeImplemento?.let { simulatorProvider?.setImplemento(it) }
+                positionProvider?.start()
+                updateGpsAccuracyIndicator(latestPose)
+            }
+            else -> {
+                checkLocationPermission()
+            }
+        }
+
+        lastPositionSource = normalized
+    }
+
 
     private fun checkLocationPermission() {
         val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PERMISSION_GRANTED
