@@ -18,6 +18,10 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 
 private const val OPTIONAL_LAYER_MASK = LAYER_SECTIONS or LAYER_RATE or LAYER_SPEED
+private const val SPEED_SCALE_MIN_GAP = 0.5f
+private const val DEFAULT_SPEED_MIN = 4f
+private const val DEFAULT_SPEED_IDEAL = 8f
+private const val DEFAULT_SPEED_MAX = 12f
 
 private class LongArraySet(initialCapacity: Int = 16) {
     private var keys = LongArray(nextPowerOfTwo(initialCapacity.coerceAtLeast(1)))
@@ -483,10 +487,7 @@ class RasterCoverageEngine {
                         buffer[i] = 0
                     } else {
                         val avg = (sums[i] / count).toFloat()
-                        val t = (avg / 20f).coerceIn(0f, 1f)
-                        val r = (t * 255).toInt()
-                        val g = 255 - r
-                        buffer[i] = (0xFF shl 24) or (r shl 16) or (g shl 8)
+                        buffer[i] = colorForSpeed(avg)
                     }
                     i++
                 }
@@ -598,6 +599,20 @@ class RasterCoverageEngine {
     fun currentOverviewState(): OverviewState? = overviewState
 
     fun setMode(mode: HotVizMode) { renderMode = mode; invalidateTiles(); Log.i(TAG_EVT, "setMode=$mode") }
+
+    fun updateSpeedScale(min: Float, ideal: Float, max: Float) {
+        val (sanitizedMin, sanitizedIdeal, sanitizedMax) = sanitizeSpeedScale(min, ideal, max)
+        val changed = abs(speedScaleMin - sanitizedMin) > 0.001f ||
+                abs(speedScaleIdeal - sanitizedIdeal) > 0.001f ||
+                abs(speedScaleMax - sanitizedMax) > 0.001f
+        if (!changed) return
+        speedScaleMin = sanitizedMin
+        speedScaleIdeal = sanitizedIdeal
+        speedScaleMax = sanitizedMax
+        if (renderMode == HotVizMode.VELOCIDADE) {
+            invalidateTiles()
+        }
+    }
 
     fun availableLayerMask(): Int {
         var mask = 0
@@ -1646,6 +1661,9 @@ class RasterCoverageEngine {
 
     // ===== Render (para overlay) =====
     @Volatile private var renderMode: HotVizMode = HotVizMode.COBERTURA
+    @Volatile private var speedScaleMin = DEFAULT_SPEED_MIN
+    @Volatile private var speedScaleIdeal = DEFAULT_SPEED_IDEAL
+    @Volatile private var speedScaleMax = DEFAULT_SPEED_MAX
 
     fun buildOrGetBitmapFor(tx: Int, ty: Int): Bitmap? = buildOrGetBitmapFor(tx, ty, 1)
 
@@ -1797,13 +1815,52 @@ class RasterCoverageEngine {
                 buffer[dstIndex] = 0
             } else {
                 val avg = sum / countCovered
-                val t = (avg / 20f).coerceIn(0f, 1f)
-                val r = (t * 255).toInt()
-                val g = 255 - r
-                buffer[dstIndex] = (0xFF shl 24) or (r shl 16) or (g shl 8)
+                buffer[dstIndex] = colorForSpeed(avg)
             }
         }
     }
+
+    private fun sanitizeSpeedScale(min: Float, ideal: Float, max: Float): Triple<Float, Float, Float> {
+        val sanitizedMin = min.coerceAtLeast(0f)
+        val sanitizedIdeal = max(ideal, sanitizedMin + SPEED_SCALE_MIN_GAP)
+        val sanitizedMax = max(max, sanitizedIdeal + SPEED_SCALE_MIN_GAP)
+        return Triple(sanitizedMin, sanitizedIdeal, sanitizedMax)
+    }
+
+    private fun colorForSpeed(avg: Float): Int {
+        val normalized = normalizedSpeed(avg)
+        return if (normalized <= 0.5f) {
+            val local = (normalized / 0.5f).coerceIn(0f, 1f)
+            val g = colorChannel(local * 255f)
+            val b = colorChannel((1f - local) * 255f)
+            (0xFF shl 24) or (0 shl 16) or (g shl 8) or b
+        } else {
+            val local = ((normalized - 0.5f) / 0.5f).coerceIn(0f, 1f)
+            val r = colorChannel(local * 255f)
+            val g = colorChannel((1f - local) * 255f)
+            (0xFF shl 24) or (r shl 16) or (g shl 8)
+        }
+    }
+
+    private fun normalizedSpeed(value: Float): Float {
+        val min = speedScaleMin
+        val ideal = speedScaleIdeal
+        val max = speedScaleMax
+        return when {
+            value <= min -> 0f
+            value >= max -> 1f
+            value <= ideal -> {
+                val span = max(ideal - min, 0.0001f)
+                ((value - min) / span) * 0.5f
+            }
+            else -> {
+                val span = max(max - ideal, 0.0001f)
+                0.5f + ((value - ideal) / span) * 0.5f
+            }
+        }
+    }
+
+    private fun colorChannel(value: Float): Int = value.roundToInt().coerceIn(0, 255)
 
     private fun fillSectionsColors(tile: TileData, blockSize: Int, outPixels: Int, buffer: IntArray) {
         val sections = tile.sections ?: run {

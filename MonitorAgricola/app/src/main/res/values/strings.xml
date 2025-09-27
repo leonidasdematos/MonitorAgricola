@@ -26,4 +26,10 @@
     <string name="follow_button_content_description_manual_off">Mapa livre. Toque para voltar a seguir o implemento.</string>
     <string name="follow_button_content_description_temporarily_off">Mapa ajustado manualmente. O mapa voltará a seguir o implemento em instantes.</string>
     <string name="route_action_button_content_description">Ação rápida da rota</string>
+    <string name="speed_controls_title">Escala de velocidade</string>
+    <string name="speed_min_label">Mín.</string>
+    <string name="speed_ideal_label">Ideal</string>
+    <string name="speed_max_label">Máx.</string>
+    <string name="speed_value_placeholder">—</string>
+    <string name="speed_value_format">%1$.1f km/h</string>
 </resources>

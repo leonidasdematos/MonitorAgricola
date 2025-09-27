@@ -76,6 +76,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.PopupMenu
 import java.util.Locale
+import com.google.android.material.slider.RangeSlider
 
 // Raster
 import com.example.monitoragricola.raster.HotVizMode
@@ -96,6 +97,15 @@ import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 
 private const val TAG_RASTER = "RASTER"
+private const val PREF_SPEED_SCALE_MIN = "speed_scale_min"
+private const val PREF_SPEED_SCALE_IDEAL = "speed_scale_ideal"
+private const val PREF_SPEED_SCALE_MAX = "speed_scale_max"
+private const val DEFAULT_SPEED_MIN = 4f
+private const val DEFAULT_SPEED_IDEAL = 8f
+private const val DEFAULT_SPEED_MAX = 12f
+private const val SPEED_SCALE_MIN_GAP = 0.5f
+private const val SPEED_SLIDER_MIN = 0f
+private const val SPEED_SLIDER_MAX = 25f
 
 class MainActivity : AppCompatActivity() {
     private var lastStatsLog = 0L
@@ -164,6 +174,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvErroLateral: TextView
     private lateinit var rasterLoadingOverlay: View
     private lateinit var progressSavingRaster: ProgressBar
+    private lateinit var speedControlsContainer: View
+    private lateinit var speedRangeSlider: RangeSlider
+    private lateinit var speedMinValue: TextView
+    private lateinit var speedIdealValue: TextView
+    private lateinit var speedMaxValue: TextView
 
     private var currentHotVizMode: HotVizMode = HotVizMode.COBERTURA
 
@@ -193,6 +208,11 @@ class MainActivity : AppCompatActivity() {
     private var followManualDisabled = false
     private val followDelayMs = 8000L
     private val followHandler = Handler(Looper.getMainLooper())
+
+    private var speedScaleMin = DEFAULT_SPEED_MIN
+    private var speedScaleIdeal = DEFAULT_SPEED_IDEAL
+    private var speedScaleMax = DEFAULT_SPEED_MAX
+    private var isUpdatingSpeedSlider = false
 
     /* ======================= Loop / posição ======================= */
     private val handler = Handler(Looper.getMainLooper())
@@ -314,6 +334,27 @@ class MainActivity : AppCompatActivity() {
         tvLinhaAlvo = findViewById(R.id.tvLinhaAlvo)
         tvErroLateral = findViewById(R.id.tvErroLateral)
         btnImplementos = findViewById(R.id.btnImplementos)
+        speedControlsContainer = findViewById(R.id.speedControlsContainer)
+        speedRangeSlider = findViewById(R.id.speedRangeSlider)
+        speedMinValue = findViewById(R.id.speedMinValue)
+        speedIdealValue = findViewById(R.id.speedIdealValue)
+        speedMaxValue = findViewById(R.id.speedMaxValue)
+
+        val savedScale = loadPersistedSpeedScale()
+        syncSpeedSliderValues(savedScale.first, savedScale.second, savedScale.third)
+        applySpeedScale(savedScale.first, savedScale.second, savedScale.third, persist = false)
+
+        speedRangeSlider.addOnChangeListener { _, _, fromUser ->
+            if (isUpdatingSpeedSlider) return@addOnChangeListener
+            val values = speedRangeSlider.values
+            if (values.size < 3) return@addOnChangeListener
+            val (min, ideal, max) = sanitizeSpeedScale(values[0], values[1], values[2])
+            val needsSync = valuesDiffer(values, min, ideal, max)
+            applySpeedScale(min, ideal, max, persist = fromUser)
+            if (needsSync) {
+                syncSpeedSliderValues(min, ideal, max)
+            }
+        }
 
 
         val container = findViewById<ConstraintLayout>(R.id.container)
@@ -322,6 +363,8 @@ class MainActivity : AppCompatActivity() {
             view.updatePadding(top = sys.top, bottom = sys.bottom)
             insets
         }
+
+        updateSpeedSliderVisibility(currentHotVizMode)
 
         restorePlayState()
         syncPlayUi()
@@ -655,6 +698,7 @@ class MainActivity : AppCompatActivity() {
                 "Engine startJob: origin=(${currentOriginLat()}, ${currentOriginLon()}) res=${currentResolutionM()} tile=${currentTileSize()}"
             )
         }
+        updateEngineSpeedScale()
         rasterEngine.attachStore(freeTileStore)
         currentTileStore = freeTileStore
         rasterOverlay = RasterCoverageOverlay(map, rasterEngine)
@@ -955,6 +999,85 @@ class MainActivity : AppCompatActivity() {
         updateFollowButtonState()
     }
 
+    /* ======================= Escala de velocidade ======================= */
+
+    private fun loadPersistedSpeedScale(): Triple<Float, Float, Float> {
+        val min = statePrefs.getFloat(PREF_SPEED_SCALE_MIN, DEFAULT_SPEED_MIN)
+        val ideal = statePrefs.getFloat(PREF_SPEED_SCALE_IDEAL, DEFAULT_SPEED_IDEAL)
+        val max = statePrefs.getFloat(PREF_SPEED_SCALE_MAX, DEFAULT_SPEED_MAX)
+        return sanitizeSpeedScale(min, ideal, max)
+    }
+
+    private fun sanitizeSpeedScale(min: Float, ideal: Float, max: Float): Triple<Float, Float, Float> {
+        val minUpperBound = (SPEED_SLIDER_MAX - 2f * SPEED_SCALE_MIN_GAP).coerceAtLeast(SPEED_SLIDER_MIN)
+        val clampedMin = min.coerceIn(SPEED_SLIDER_MIN, minUpperBound)
+        val idealLowerBound = clampedMin + SPEED_SCALE_MIN_GAP
+        val idealUpperBound = (SPEED_SLIDER_MAX - SPEED_SCALE_MIN_GAP).coerceAtLeast(idealLowerBound)
+        val clampedIdeal = ideal.coerceIn(idealLowerBound, idealUpperBound)
+        val maxLowerBound = clampedIdeal + SPEED_SCALE_MIN_GAP
+        val clampedMax = max.coerceIn(maxLowerBound, SPEED_SLIDER_MAX)
+        return Triple(clampedMin, clampedIdeal, clampedMax)
+    }
+
+    private fun syncSpeedSliderValues(min: Float, ideal: Float, max: Float) {
+        if (!::speedRangeSlider.isInitialized) return
+        isUpdatingSpeedSlider = true
+        speedRangeSlider.setValues(min, ideal, max)
+        isUpdatingSpeedSlider = false
+    }
+
+    private fun valuesDiffer(values: List<Float>, min: Float, ideal: Float, max: Float): Boolean {
+        if (values.size < 3) return true
+        return abs(values[0] - min) > 0.001f ||
+                abs(values[1] - ideal) > 0.001f ||
+                abs(values[2] - max) > 0.001f
+    }
+
+    private fun applySpeedScale(min: Float, ideal: Float, max: Float, persist: Boolean) {
+        val (sanitizedMin, sanitizedIdeal, sanitizedMax) = sanitizeSpeedScale(min, ideal, max)
+        speedScaleMin = sanitizedMin
+        speedScaleIdeal = sanitizedIdeal
+        speedScaleMax = sanitizedMax
+        updateSpeedScaleLabels()
+        if (persist) {
+            statePrefs.edit()
+                .putFloat(PREF_SPEED_SCALE_MIN, sanitizedMin)
+                .putFloat(PREF_SPEED_SCALE_IDEAL, sanitizedIdeal)
+                .putFloat(PREF_SPEED_SCALE_MAX, sanitizedMax)
+                .apply()
+        }
+        updateEngineSpeedScale()
+        if (::rasterOverlay.isInitialized && currentHotVizMode == HotVizMode.VELOCIDADE) {
+            rasterOverlay.invalidateTiles()
+            map.invalidate()
+        }
+    }
+
+    private fun updateSpeedScaleLabels() {
+        if (!::speedMinValue.isInitialized) return
+        speedMinValue.text = formatSpeedValue(speedScaleMin)
+        speedIdealValue.text = formatSpeedValue(speedScaleIdeal)
+        speedMaxValue.text = formatSpeedValue(speedScaleMax)
+    }
+
+    private fun formatSpeedValue(value: Float): String =
+        getString(R.string.speed_value_format, value)
+
+    private fun updateSpeedSliderVisibility(mode: HotVizMode = currentHotVizMode) {
+        if (!::speedControlsContainer.isInitialized) return
+        val visible = mode == HotVizMode.VELOCIDADE
+        speedControlsContainer.isVisible = visible
+        if (visible) {
+            updateSpeedScaleLabels()
+        }
+    }
+
+    private fun updateEngineSpeedScale() {
+        if (!::rasterEngine.isInitialized) return
+        rasterEngine.updateSpeedScale(speedScaleMin, speedScaleIdeal, speedScaleMax)
+    }
+
+
     private fun availableLayerOptions(mask: Int): List<LayerOption> =
         layerOptions.filter { option ->
             option.requiredMask == null || option.requiredMask and mask != 0
@@ -987,6 +1110,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setHotLayerMode(mode: HotVizMode, showFeedback: Boolean) {
+        updateSpeedSliderVisibility(mode)
         updateLayerButtonContentDescription(mode)
         if (mode == currentHotVizMode) {
             if (showFeedback) {
