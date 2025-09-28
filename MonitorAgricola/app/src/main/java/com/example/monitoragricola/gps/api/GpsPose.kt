@@ -17,3 +17,4 @@ data class GpsPose(
 )
 
 const val SOURCE_DEVICE_GPS = "DEVICE_GPS"
+const val SOURCE_EXTERNAL_GATEWAY = "EXTERNAL_GATEWAY"

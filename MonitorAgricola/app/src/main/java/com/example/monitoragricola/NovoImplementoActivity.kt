@@ -27,12 +27,16 @@ class NovoImplementoActivity : AppCompatActivity() {
     private lateinit var containerArticulado: LinearLayout
     private lateinit var etDistAntenaArticulacao: EditText
     private lateinit var etDistArticulacaoImplemento: EditText
+    private lateinit var tvGatewayMedium: TextView
+    private lateinit var spinnerGatewayMedium: Spinner
 
 
 
     private val camposViews = mutableMapOf<String, EditText>()
     private var tipoSelecionado = ""
     private var implementoEdicaoId: Int? = null
+    private var currentHardwareEndpoint: String? = null
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +58,8 @@ class NovoImplementoActivity : AppCompatActivity() {
         containerArticulado = findViewById(R.id.containerArticulado)
         etDistAntenaArticulacao = findViewById(R.id.etDistAntenaArticulacao)
         etDistArticulacaoImplemento = findViewById(R.id.etDistArticulacaoImplemento)
+        tvGatewayMedium = findViewById(R.id.tvGatewayMedium)
+        spinnerGatewayMedium = findViewById(R.id.spinnerGatewayMedium)
 
         btnConfigAvancadas.setOnClickListener {
             containerConfigAvancadas.visibility =
@@ -62,9 +68,15 @@ class NovoImplementoActivity : AppCompatActivity() {
 
         configurarSpinner()
         configurarModoRastroSpinner()
+        configurarGatewayMediumSpinner()
         configurarBotoes()
-        carregarImplementoEdicao()
 
+        rgModoCadastro.setOnCheckedChangeListener { _, checkedId ->
+            updateGatewayMediumVisibility(checkedId == R.id.rbAutomatico)
+        }
+
+        updateGatewayMediumVisibility(rgModoCadastro.checkedRadioButtonId == R.id.rbAutomatico)
+        carregarImplementoEdicao()
 
     }
 
@@ -135,6 +147,7 @@ class NovoImplementoActivity : AppCompatActivity() {
             val implemento = Gson().fromJson(implementoJson, Implemento::class.java)
 
             implementoEdicaoId = implemento.id
+            currentHardwareEndpoint = implemento.hardwareEndpoint
 
             etNomeImplemento.setText(implemento.nome)
             val pos =
@@ -147,6 +160,11 @@ class NovoImplementoActivity : AppCompatActivity() {
                 rgModoCadastro.check(R.id.rbManual)
             }
 
+            val medium = GatewayMediumOption.fromKey(
+                implemento.hardwareTransport ?: if (implemento.hardwareManaged) "bluetooth" else null
+            )
+            spinnerGatewayMedium.setSelection(medium.ordinal)
+            updateGatewayMediumVisibility(implemento.modoCadastro == "automatico" || implemento.hardwareManaged)
 
             val modoRastroKey = implemento.modoRastro ?: "entrada" // default
             val uiModo = UIModoRastro.fromKey(modoRastroKey)
@@ -186,6 +204,19 @@ class NovoImplementoActivity : AppCompatActivity() {
         }
     }
 
+    private fun configurarGatewayMediumSpinner() {
+        val labels = GatewayMediumOption.values().map { getString(it.labelRes) }
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerGatewayMedium.adapter = adapter
+    }
+
+    private fun updateGatewayMediumVisibility(automatico: Boolean) {
+        val visibility = if (automatico) View.VISIBLE else View.GONE
+        tvGatewayMedium.visibility = visibility
+        spinnerGatewayMedium.visibility = visibility
+    }
+
     private fun validarCampos(): Boolean {
         if (etNomeImplemento.text.toString().trim().isEmpty()) {
             Toast.makeText(this, "Digite um nome para o implemento", Toast.LENGTH_SHORT).show()
@@ -223,6 +254,14 @@ class NovoImplementoActivity : AppCompatActivity() {
             R.id.rbAutomatico -> "automatico"
             else -> "manual"
         }
+
+        val hardwareManaged = modoCadastro == "automatico"
+        val hardwareTransport = if (hardwareManaged) {
+            GatewayMediumOption.values()[spinnerGatewayMedium.selectedItemPosition].key
+        } else {
+            null
+        }
+        val hardwareEndpoint = if (hardwareManaged) currentHardwareEndpoint else null
 
         val numLinhas = camposViews["numLinhas"]?.text.toString().toIntOrNull() ?: 0
         var espacamento =
@@ -293,7 +332,10 @@ class NovoImplementoActivity : AppCompatActivity() {
             // NOVOS:
             modoRastro = modoRastroKey, // "fixo" | "entrada" | "articulado"
             distAntenaArticulacao = if (uiModo == UIModoRastro.ARTICULADO) distAntenaArticulacao else null,
-            distArticulacaoImplemento = if (uiModo == UIModoRastro.ARTICULADO) distArticulacaoImplemento else null
+            distArticulacaoImplemento = if (uiModo == UIModoRastro.ARTICULADO) distArticulacaoImplemento else null,
+            hardwareManaged = hardwareManaged,
+            hardwareTransport = hardwareTransport,
+            hardwareEndpoint = hardwareEndpoint
         )
 
         val prefs = getSharedPreferences("implementos", MODE_PRIVATE)
@@ -329,6 +371,18 @@ class NovoImplementoActivity : AppCompatActivity() {
             fun fromKey(k: String?): UIModoRastro {
                 val kk = (k ?: "").lowercase()
                 return values().firstOrNull { it.key == kk } ?: ENTRADA
+            }
+        }
+    }
+
+    private enum class GatewayMediumOption(val key: String, val labelRes: Int) {
+        BLUETOOTH("bluetooth", R.string.gateway_medium_bluetooth),
+        CABLE("cable", R.string.gateway_medium_cable);
+
+        companion object {
+            fun fromKey(key: String?): GatewayMediumOption {
+                val norm = (key ?: "").lowercase()
+                return values().firstOrNull { it.key == norm } ?: BLUETOOTH
             }
         }
     }

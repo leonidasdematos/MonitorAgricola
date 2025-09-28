@@ -34,6 +34,7 @@ abstract class ImplementoBase(
 
     private var lastHeadingRad: Double? = null
 
+    @Volatile private var latestExternalTelemetry: ExternalTelemetry? = null
 
     fun getImplementBarEndpoints(): Pair<GeoPoint, GeoPoint>? =
         if (lastBarP1 != null && lastBarP2 != null) lastBarP1!! to lastBarP2!! else null
@@ -183,8 +184,10 @@ abstract class ImplementoBase(
 
 
         // Pintura raster só quando rodando
-        if (running && !rasterSuspended && dImpl >= EPS_IMPL) {
-            val lastImplLL = proj.toLatLon(lastImplLocal)
+        val telemetry = latestExternalTelemetry
+        val implementActive = telemetry?.isImplementActive ?: true
+
+        if (running && !rasterSuspended && implementActive && dImpl >= EPS_IMPL) {            val lastImplLL = proj.toLatLon(lastImplLocal)
             val curImplLL2 = proj.toLatLon(curImplLocal)
             val lastImpl = GeoPoint(lastImplLL.latitude, lastImplLL.longitude)
             val curImpl  = GeoPoint(curImplLL2.latitude,  curImplLL2.longitude)
@@ -195,8 +198,8 @@ abstract class ImplementoBase(
                     last = lastImpl,
                     current = curImpl,
                     implementWidthMeters = w.toDouble(),
-                    activeSectionsMask = 0,   // ou seu bitmask real
-                    rateValue = null,
+                    activeSectionsMask = telemetry?.activeSectionsMask ?: 0,
+                    rateValue = telemetry?.rateValue,
                     strokeRightX = strokeRightOverride?.first,
                     strokeRightY = strokeRightOverride?.second
                 )
@@ -344,7 +347,21 @@ abstract class ImplementoBase(
 
     protected var implThetaRad: Double? = null
 
-    open class RuntimeState(var thetaRad: Double? = null)
-    open fun exportRuntimeState(): RuntimeState = RuntimeState(thetaRad = implThetaRad)
-    open fun importRuntimeState(state: RuntimeState?) { implThetaRad = state?.thetaRad }
+    data class ExternalTelemetry(
+        val isImplementActive: Boolean,
+        val activeSectionsMask: Int,
+        val rateValue: Float?,
+        val timestampMillis: Long,
+    )
+
+    open fun updateExternalTelemetry(telemetry: ExternalTelemetry?) {
+        latestExternalTelemetry = telemetry
+    }
+
+    open class RuntimeState(var thetaRad: Double? = null, var telemetry: ExternalTelemetry? = null)
+    open fun exportRuntimeState(): RuntimeState = RuntimeState(thetaRad = implThetaRad, telemetry = latestExternalTelemetry)
+    open fun importRuntimeState(state: RuntimeState?) {
+        implThetaRad = state?.thetaRad
+        latestExternalTelemetry = state?.telemetry
+    }
 }

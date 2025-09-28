@@ -176,10 +176,25 @@
                 android:id="@+id/rbAutomatico"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Automático"
-                android:enabled="false" />
+                android:text="@string/implemento_mode_hardware" />
 
         </RadioGroup>
+
+        <TextView
+            android:id="@+id/tvGatewayMedium"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/gateway_medium_label"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <Spinner
+            android:id="@+id/spinnerGatewayMedium"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone" />
 
         <Button
             android:id="@+id/btnSalvarImplemento"

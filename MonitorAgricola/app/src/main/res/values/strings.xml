@@ -1,5 +1,10 @@
 <resources>
     <string name="app_name">Monitor Agrícola</string>
+    <string name="settings_source_gateway">Gateway externo (filtrado)</string>
+    <string name="implemento_mode_hardware">Controlado por hardware externo</string>
+    <string name="gateway_medium_label">Canal de comunicação com o gateway</string>
+    <string name="gateway_medium_bluetooth">Bluetooth</string>
+    <string name="gateway_medium_cable">Cabo / Ethernet</string>
     <string name="taxa_semente">Taxa Semente: %1$d</string>
     <string name="taxa_adubo">Taxa Adubo: %1$d</string>
     <string name="trator">Trator</string>

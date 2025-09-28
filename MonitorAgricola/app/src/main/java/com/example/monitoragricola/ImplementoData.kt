@@ -36,8 +36,12 @@ data class Implemento(
     // NOVOS CAMPOS
     val modoRastro: String? = null,                // "fixo" | "entrada" | "articulado"
     val distAntenaArticulacao: Float? = null,      // metros
-    val distArticulacaoImplemento: Float? = null   // metros
-) {
+    val distArticulacaoImplemento: Float? = null,  // metros
+
+    val hardwareManaged: Boolean = false,
+    val hardwareTransport: String? = null,
+    val hardwareEndpoint: String? = null,
+    ) {
     companion object {
         private const val PREFS_NAME = "implemento_prefs"
         private const val KEY_LAST_ID = "last_id"

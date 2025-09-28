@@ -7,6 +7,7 @@ import com.example.monitoragricola.jobs.JobRecorder
 import com.example.monitoragricola.jobs.JobManager
 import com.example.monitoragricola.jobs.JobsRepository
 import com.example.monitoragricola.map.ImplementoBase
+import com.example.monitoragricola.hardware.gateway.RaspberryGatewayManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -100,6 +101,10 @@ class App : Application() {
     }
     val routesManager by lazy {
         com.example.monitoragricola.jobs.routes.RoutesManager(routesRepository)
+    }
+
+    val gatewayManager: RaspberryGatewayManager by lazy {
+        RaspberryGatewayManager(applicationScope)
     }
 
     class ImplementoStateStore {

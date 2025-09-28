@@ -122,6 +122,10 @@ object ImplementosPrefs {
         val distAntArt = impl.distAntenaArticulacao
         val distArtImpl = impl.distArticulacaoImplemento
 
+        val hardwareManaged = impl.hardwareManaged || impl.modoCadastro.equals("automatico", ignoreCase = true)
+        val hardwareTransport = impl.hardwareTransport ?: if (hardwareManaged) "bluetooth" else null
+        val hardwareEndpoint = impl.hardwareEndpoint
+
         return ImplementoSnapshot(
             id = impl.id,
             nome = impl.nome ?: "Implemento",
@@ -136,7 +140,10 @@ object ImplementosPrefs {
             // NOVOS:
             modoRastro = modoRastro,
             distAntenaArticulacaoM = distAntArt,
-            distArticulacaoImplementoM = distArtImpl
+            distArticulacaoImplementoM = distArtImpl,
+            hardwareManaged = hardwareManaged,
+            hardwareTransport = hardwareTransport,
+            hardwareEndpoint = hardwareEndpoint
         )
     }
 }

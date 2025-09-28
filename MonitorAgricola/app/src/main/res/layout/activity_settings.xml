@@ -32,8 +32,7 @@
                 android:id="@+id/rbRtk"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Ardusimple RTK (em breve)"
-                android:enabled="false" />
+                android:text="@string/settings_source_gateway" />
 
         </RadioGroup>
 
