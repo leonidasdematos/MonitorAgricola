@@ -47,8 +47,8 @@ class FilteredDevicePositionProvider(
         outlierGate = OutlierGate(
             OutlierGate.Params(
                 maxJumpM = settings.maxJumpM,
-                maxAccelerationMps2 = 5.0,
-                maxTurnRateDegPerSec = if (settings.articulatedModeEnabled) 90.0 else 120.0,
+                maxAccelerationMps2 = 7.5,
+                maxTurnRateDegPerSec = if (settings.articulatedModeEnabled) 80.0 else 135.0,
             )
         ),
         stationaryDetector = StationaryDetector(

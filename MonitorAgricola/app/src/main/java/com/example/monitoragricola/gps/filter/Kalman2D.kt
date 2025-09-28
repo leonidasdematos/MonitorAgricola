@@ -1,5 +1,6 @@
 package com.example.monitoragricola.gps.filter
 
+import kotlin.math.hypot
 import kotlin.math.max
 
 class Kalman2D(
@@ -64,6 +65,21 @@ class Kalman2D(
         lastQPos = boost * dt
         return lastQPos
     }
+
+    fun predictOnly(dtSec: Double): State? {
+        if (!initialized) return null
+        val clampedDt = dtSec.coerceAtLeast(1e-3)
+        val speed = hypot(state[2], state[3])
+        predict(clampedDt, adaptProcessNoise(speed, clampedDt))
+        return State(state[0], state[1], state[2], state[3])
+    }
+
+    fun currentState(): State? = if (initialized) {
+        State(state[0], state[1], state[2], state[3])
+    } else {
+        null
+    }
+
 
     private fun predict(dt: Double, qPos: Double) {
         val F = doubleArrayOf(

@@ -53,6 +53,10 @@ class GpsFilterPipeline(
     private var lastAlpha = params.emaAlphaLowSpeed
     private var articulatedMode = params.articulatedModeEnabled
 
+    private var lastPose: GpsPose? = null
+    private var lastAccuracy = params.maxAccM
+
+
     private val minIntervalMs = max(40L, (1000.0 / params.rateLimitHz).toLong())
     private val lastEmit = AtomicLong(0)
     private var pendingPose: GpsPose? = null
@@ -75,19 +79,27 @@ class GpsFilterPipeline(
         consecutiveRejects = 0
         pendingPose = null
         pendingSince = 0L
+        lastPose = null
+        lastAccuracy = params.maxAccM
+        accuracyAvg = 0.0
+        accuracyCount = 0
+        rejectAccuracy = 0
+        rejectSpeed = 0
+        rejectTime = 0
     }
 
     fun process(location: Location): GpsPose? {
         val now = clock.millis()
         val acc = if (location.hasAccuracy()) location.accuracy.toDouble() else Double.NaN
+        val timestamp = location.time
         if (!location.hasAccuracy() || acc.isNaN() || acc > params.maxAccM) {
             rejectAccuracy++
-            return null
+            return predictFallback(timestamp, now)
         }
 
         if (abs(now - location.time) > 2000) {
             rejectTime++
-            return null
+            return predictFallback(timestamp, now)
         }
 
         val projection = ensureProjection(location.latitude, location.longitude)
@@ -96,7 +108,7 @@ class GpsFilterPipeline(
         val speedMpsRaw = when {
             location.hasSpeed() -> location.speed.toDouble().coerceAtLeast(0.0)
             hasLastAccepted -> {
-                val dtSec = ((location.time - lastMeasurementMillis) / 1000.0).coerceAtLeast(1e-3)
+                val dtSec = ((timestamp - lastMeasurementMillis) / 1000.0).coerceAtLeast(1e-3)
                 val prev = projection.toLocalMeters(lastAcceptedLat, lastAcceptedLon)
                 val dist = hypot(curr.x - prev.x, curr.y - prev.y)
                 dist / dtSec
@@ -104,31 +116,32 @@ class GpsFilterPipeline(
             else -> 0.0
         }
 
-        if (speedMpsRaw > 20.0) {
+        if (speedMpsRaw > 22.5) {
             rejectSpeed++
-            return null
+            return predictFallback(timestamp, now)
         }
 
         val candidate = OutlierGate.Candidate(
             x = curr.x,
             y = curr.y,
-            timestampMillis = location.time,
+            timestampMillis = timestamp,
             speedMps = speedMpsRaw,
         )
         if (!outlierGate.evaluate(candidate)) {
             consecutiveRejects++
-            if (consecutiveRejects > 4) {
+            if (consecutiveRejects > 8) {
                 kalman.reset()
                 headingFilter.reset()
                 stationaryDetector.reset()
-                //projection = null
+                outlierGate.reset()
+                consecutiveRejects = 0
             }
-            return null
+            return predictFallback(timestamp, now)
         }
         consecutiveRejects = 0
 
-        val dtSec = if (lastMeasurementMillis != 0L) ((location.time - lastMeasurementMillis) / 1000.0).coerceAtLeast(1e-3) else 0.1
-        lastMeasurementMillis = location.time
+        val dtSec = if (lastMeasurementMillis != 0L) ((timestamp - lastMeasurementMillis) / 1000.0).coerceAtLeast(1e-3) else 0.1
+        lastMeasurementMillis = timestamp
         lastAcceptedLat = location.latitude
         lastAcceptedLon = location.longitude
         hasLastAccepted = true
@@ -137,11 +150,43 @@ class GpsFilterPipeline(
         val state = kalman.update(curr.x, curr.y, accuracyClamped, dtSec, speedMpsRaw)
         val kalmanSpeed = hypot(state.vx, state.vy)
         val stationary = stationaryDetector.update(state.x, state.y, state.vx, state.vy, kalmanSpeed, articulatedMode)
+        val pose = buildPose(state, stationary, accuracyClamped, timestamp, now, projection)
+
+        if (accuracyCount == 0) {
+            accuracyAvg = accuracyClamped
+        } else {
+            accuracyAvg = (accuracyAvg * accuracyCount + accuracyClamped) / (accuracyCount + 1)
+        }
+        accuracyCount++
+        lastAccuracy = accuracyClamped
+
+        val emitted = emitPose(pose, now)
+        logStatsIfNeeded(now)
+        return emitted
+    }
+
+    private fun ensureProjection(lat: Double, lon: Double): ProjectionHelper {
+        val current = projection
+        if (current != null) return current
+        val helper = ProjectionHelper(lat, lon)
+        projection = helper
+        return helper
+    }
+
+    private fun buildPose(
+        state: Kalman2D.State,
+        stationary: StationaryDetector.Result,
+        accuracyM: Double,
+        timestamp: Long,
+        now: Long,
+        projection: ProjectionHelper,
+    ): GpsPose {
+        val speed = hypot(state.vx, state.vy)
         val heading = headingFilter.update(
             state.vx,
             state.vy,
-            kalmanSpeed,
-            location.time,
+            speed,
+            timestamp,
             stationary.headingDeg,
             null,
         )
@@ -152,31 +197,17 @@ class GpsFilterPipeline(
         tmpCoordinate.y = compensated.second
         val geo = projection.toLatLon(tmpCoordinate)
 
-        accuracyAvg = (accuracyAvg * accuracyCount + accuracyClamped) / (accuracyCount + 1)
-        accuracyCount++
+        lastLatency = max(0.0, now - timestamp.toDouble())
 
-        lastLatency = max(0.0, now - location.time.toDouble())
 
-        val pose = GpsPose(
+        return GpsPose(
             latitude = geo.latitude,
             longitude = geo.longitude,
             headingDeg = heading.headingDeg,
-            speedMps = kalmanSpeed,
-            accuracyM = accuracyClamped,
-            timestampMillis = location.time,
+            speedMps = speed,
+            accuracyM = accuracyM,
+            timestampMillis = timestamp,
         )
-
-        val toEmit = applyRateLimit(pose, now)
-        logStatsIfNeeded(now)
-        return toEmit
-    }
-
-    private fun ensureProjection(lat: Double, lon: Double): ProjectionHelper {
-        val current = projection
-        if (current != null) return current
-        val helper = ProjectionHelper(lat, lon)
-        projection = helper
-        return helper
     }
 
     private fun applyRateLimit(pose: GpsPose, now: Long): GpsPose? {
@@ -205,6 +236,48 @@ class GpsFilterPipeline(
         }
         return null
     }
+
+    private fun emitPose(pose: GpsPose, now: Long): GpsPose? {
+        val emitted = applyRateLimit(pose, now)
+        lastPose = emitted ?: pose
+        return emitted
+    }
+
+    private fun predictFallback(timestamp: Long, now: Long): GpsPose? {
+        val projectionHelper = projection
+        val state = predictState(timestamp)
+        val pose = when {
+            state != null && projectionHelper != null -> {
+                val speed = hypot(state.vx, state.vy)
+                val stationary = stationaryDetector.update(state.x, state.y, state.vx, state.vy, speed, articulatedMode)
+                buildPose(state, stationary, lastAccuracy, timestamp, now, projectionHelper)
+            }
+            lastPose != null -> {
+                lastLatency = max(0.0, now - timestamp.toDouble())
+                lastPose!!.copy(timestampMillis = timestamp)
+            }
+            else -> return null
+        }
+
+        val emitted = emitPose(pose, now)
+        logStatsIfNeeded(now)
+        return emitted
+    }
+
+    private fun predictState(timestamp: Long): Kalman2D.State? {
+        if (!kalman.isInitialized()) return null
+        val lastTs = lastMeasurementMillis
+        val dtSec = if (lastTs != 0L) ((timestamp - lastTs) / 1000.0) else 0.0
+        val state = when {
+            dtSec > 1e-3 -> kalman.predictOnly(dtSec)
+            else -> kalman.currentState()
+        }
+        if (state != null && timestamp > lastMeasurementMillis) {
+            lastMeasurementMillis = timestamp
+        }
+        return state
+    }
+
 
     private fun logStatsIfNeeded(now: Long) {
         if (now - lastLog < 2000) return
