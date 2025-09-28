@@ -24,7 +24,7 @@ class TractorSimulator(
     // ===========================
     // Parâmetros de simulação
     // ===========================
-    var speedMps: Double = 0.5           // velocidade ~5,4 km/h (bem plausível para operação)
+    var speedMps: Double = 1.0           // velocidade ~5,4 km/h (bem plausível para operação)
     var rowLengthMeters: Double = 60.0  // comprimento da passada
     var fieldAzimuthDeg: Double = 45.0   // direção das linhas do talhão (0 = leste, 90 = norte)
 

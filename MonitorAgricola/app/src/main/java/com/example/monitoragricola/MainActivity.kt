@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.MotionEvent
 import android.widget.ImageButton
 import android.widget.ProgressBar
@@ -106,6 +107,7 @@ private const val DEFAULT_SPEED_MAX = 12f
 private const val SPEED_SCALE_MIN_GAP = 0.5f
 private const val SPEED_SLIDER_MIN = 0f
 private const val SPEED_SLIDER_MAX = 25f
+private const val TARGET_FRAME_RATE_FPS = 30
 
 class MainActivity : AppCompatActivity() {
     private var lastStatsLog = 0L
@@ -216,7 +218,7 @@ class MainActivity : AppCompatActivity() {
 
     /* ======================= Loop / posição ======================= */
     private val handler = Handler(Looper.getMainLooper())
-    private val updateInterval = 10L
+    private val frameIntervalMs = max(1000L / TARGET_FRAME_RATE_FPS, 1L)
     private var lastHotUpdate = 0L
     private var lastViewportUpdate = 0L
 
@@ -1229,6 +1231,7 @@ class MainActivity : AppCompatActivity() {
         startViewportUpdates()
         handler.post(object : Runnable {
             override fun run() {
+                val frameStart = SystemClock.elapsedRealtime()
                 val now = System.currentTimeMillis()
                 val rawFixMillis = filteredDeviceProvider?.lastFixMillis() ?: 0L
                 positionProvider?.getCurrentPosition()?.let { pos ->
@@ -1360,7 +1363,9 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "Sinal de posição perdido", Toast.LENGTH_SHORT).show()
                 }
 
-                handler.postDelayed(this, updateInterval)
+                val frameDuration = SystemClock.elapsedRealtime() - frameStart
+                val nextDelay = max(frameIntervalMs - frameDuration, 0L)
+                handler.postDelayed(this, nextDelay)
             }
         })
     }
