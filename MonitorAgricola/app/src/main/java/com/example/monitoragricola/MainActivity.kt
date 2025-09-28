@@ -2491,12 +2491,15 @@ class MainActivity : AppCompatActivity() {
         latestPose = null
 
         val snapshot = lastAppliedImplementoSnapshot
-        val config = snapshot?.takeIf { it.hardwareManaged }?.let {
-            GatewayConnectionConfig(
-                medium = GatewayConnectionMedium.fromStorageKey(it.hardwareTransport),
-                endpoint = it.hardwareEndpoint?.takeIf { endpoint -> endpoint.isNotBlank() }
-            )
-        } ?: GatewayConnectionConfig.default()
+        val config = if (snapshot != null && snapshot.hardwareManaged) {
+            val medium = GatewayConnectionMedium.fromStorageKey(snapshot.hardwareTransport)
+            val endpoint = snapshot.hardwareEndpoint?.let { endpoint ->
+                if (endpoint.isBlank()) null else endpoint
+            }
+            GatewayConnectionConfig(medium = medium, endpoint = endpoint)
+        } else {
+            GatewayConnectionConfig.default()
+        }
 
         gatewayManager.ensureConnected(config)
 
@@ -2575,7 +2578,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (externalGatewayProvider != null) {
-            val hardwareSnapshot = snapshot.takeIf { it?.hardwareManaged == true }
+            val hardwareSnapshot = if (snapshot != null && snapshot.hardwareManaged) snapshot else null
             if (hardwareSnapshot == null) {
                 (activeImplemento as? ImplementoBase)?.updateExternalTelemetry(null)
             }
@@ -2592,9 +2595,13 @@ class MainActivity : AppCompatActivity() {
         gatewaySyncJob?.cancel()
         gatewaySyncJob = lifecycleScope.launch {
             if (snapshot != null) {
+                val medium = GatewayConnectionMedium.fromStorageKey(snapshot.hardwareTransport)
+                val endpoint = snapshot.hardwareEndpoint?.let { endpoint ->
+                    if (endpoint.isBlank()) null else endpoint
+                }
                 val config = GatewayConnectionConfig(
-                    medium = GatewayConnectionMedium.fromStorageKey(snapshot.hardwareTransport),
-                    endpoint = snapshot.hardwareEndpoint?.takeIf { it.isNotBlank() }
+                    medium = medium,
+                    endpoint = endpoint
                 )
                 gatewayManager.ensureConnected(config)
                 gatewayManager.sendImplementConfiguration(snapshot.toGatewayConfiguration(gpsFilterSettings))
