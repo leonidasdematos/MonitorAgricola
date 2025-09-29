@@ -55,6 +55,12 @@ object ImplementoSelector {
         _snapshotFlow.value = currentSnapshot(ctx)
     }
 
+    /** Reavalia o snapshot atual com base no estado salvo nas prefs. */
+    fun refresh(ctx: Context) {
+        _snapshotFlow.value = currentSnapshot(ctx)
+    }
+
+
     // ---------- Normalização/coerência ----------
 
     private fun normalize(snap: ImplementoSnapshot): ImplementoSnapshot {

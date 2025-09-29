@@ -1861,6 +1861,7 @@ class MainActivity : AppCompatActivity() {
         if (animate) {
             map.controller.animateTo(target)
         } else {
+            map.controller.setZoom(22.0)
             map.controller.setCenter(target)
         }
         val previous = lastPoint

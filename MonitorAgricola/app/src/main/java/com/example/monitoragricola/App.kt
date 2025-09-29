@@ -104,7 +104,7 @@ class App : Application() {
     }
 
     val gatewayManager: RaspberryGatewayManager by lazy {
-        RaspberryGatewayManager(applicationScope)
+        RaspberryGatewayManager(applicationContext, applicationScope)
     }
 
     class ImplementoStateStore {

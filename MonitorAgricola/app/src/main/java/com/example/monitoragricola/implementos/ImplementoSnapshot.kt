@@ -18,5 +18,9 @@ data class ImplementoSnapshot(
     // NOVOS:
     val modoRastro: String? = null,                // "fixo" | "entrada" | "articulado"
     val distAntenaArticulacaoM: Float? = null,     // se articulado
-    val distArticulacaoImplementoM: Float? = null  // se articulado
-)
+    val distArticulacaoImplementoM: Float? = null, // se articulado
+
+    val hardwareManaged: Boolean = false,
+    val hardwareTransport: String? = null,
+    val hardwareEndpoint: String? = null,
+    )
