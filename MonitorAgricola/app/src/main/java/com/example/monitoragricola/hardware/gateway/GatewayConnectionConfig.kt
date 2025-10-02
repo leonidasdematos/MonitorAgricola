@@ -20,6 +20,6 @@ data class GatewayConnectionConfig(
     val endpoint: String? = null,
 ) {
     companion object {
-        fun default(): GatewayConnectionConfig = GatewayConnectionConfig(GatewayConnectionMedium.BLUETOOTH, null)
+        fun default(): GatewayConnectionConfig = GatewayConnectionConfig(GatewayConnectionMedium.CABLE, null)
     }
 }

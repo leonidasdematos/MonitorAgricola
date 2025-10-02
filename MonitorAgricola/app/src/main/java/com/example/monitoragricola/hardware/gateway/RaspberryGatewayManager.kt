@@ -1,5 +1,9 @@
 package com.example.monitoragricola.hardware.gateway
 
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.util.Log
 import com.example.monitoragricola.gps.api.GpsPose
@@ -15,6 +19,7 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -168,24 +173,44 @@ class RaspberryGatewayManager(
 
     private suspend fun runConnection(config: GatewayConnectionConfig) {
         _connectionState.value = GatewayConnectionState.Connecting(config)
-        val resolved = resolveEndpoint(config)
-        var socket: Socket? = null
+        val resolved = try {
+            resolveEndpoint(config)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            Log.e(TAG, "Falha ao resolver endpoint do gateway", t)
+            _connectionState.value = GatewayConnectionState.Error(config, t)
+            withContext(NonCancellable) { cleanupAfterDisconnect() }
+            return
+        }
+        var tcpSocket: Socket? = null
+        var bluetoothSocket: BluetoothSocket? = null
         try {
-            socket = withContext(Dispatchers.IO) {
-                Socket().apply {
-                    connect(InetSocketAddress(resolved.host, resolved.port), SOCKET_CONNECT_TIMEOUT_MS)
-                    soTimeout = SOCKET_READ_TIMEOUT_MS
+            val streams = when (resolved) {
+                is ResolvedEndpoint.Tcp -> {
+                    val socket = withContext(Dispatchers.IO) {
+                        Socket().apply {
+                            connect(InetSocketAddress(resolved.host, resolved.port), SOCKET_CONNECT_TIMEOUT_MS)
+                            soTimeout = SOCKET_READ_TIMEOUT_MS
+                        }
+                    }
+                    tcpSocket = socket
+                    ConnectionStreams(
+                        reader = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8)),
+                        writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)),
+                    )
+                }
+                is ResolvedEndpoint.Bluetooth -> {
+                    val socket = openBluetoothSocket(resolved)
+                    bluetoothSocket = socket
+                    ConnectionStreams(
+                        reader = BufferedReader(InputStreamReader(socket.inputStream, StandardCharsets.UTF_8)),
+                        writer = BufferedWriter(OutputStreamWriter(socket.outputStream, StandardCharsets.UTF_8)),
+                    )
                 }
             }
-            Log.i(TAG, "Conectado ao gateway ${resolved.host}:${resolved.port}")
-            withContext(Dispatchers.IO) {
-                socket.use { s ->
-                    val reader = BufferedReader(InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8))
-                    val writer = BufferedWriter(OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8))
-                    performHandshake(config, resolved, reader, writer)
-                    listenLoop(config, resolved, reader, writer)
-                }
-            }
+            Log.i(TAG, "Conectado ao gateway ${resolved.describe()}")
+            performHandshake(config, resolved, streams.reader, streams.writer)
+            listenLoop(config, resolved, streams.reader, streams.writer)
         } catch (t: Throwable) {
             if (t is CancellationException) {
                 throw t
@@ -196,10 +221,38 @@ class RaspberryGatewayManager(
             withContext(NonCancellable) {
                 cleanupAfterDisconnect()
             }
-            try {
-                socket?.close()
-            } catch (_: Throwable) {
+            withContext(Dispatchers.IO) {
+                try {
+                    tcpSocket?.close()
+                } catch (_: Throwable) {
+                }
+                try {
+                    bluetoothSocket?.close()
+                } catch (_: Throwable) {
+                }
             }
+        }
+    }
+
+    private data class ConnectionStreams(
+        val reader: BufferedReader,
+        val writer: BufferedWriter,
+    )
+
+    @SuppressLint("MissingPermission")
+    private suspend fun openBluetoothSocket(endpoint: ResolvedEndpoint.Bluetooth): BluetoothSocket {
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+            ?: throw IllegalStateException("Bluetooth indisponível")
+        return withContext(Dispatchers.IO) {
+            try {
+                if (adapter.isDiscovering) {
+                    adapter.cancelDiscovery()
+                }
+            } catch (_: SecurityException) {
+            }
+            val socket = endpoint.device.createRfcommSocketToServiceRecord(GATEWAY_BLUETOOTH_UUID)
+            socket.connect()
+            socket
         }
     }
 
@@ -303,19 +356,49 @@ class RaspberryGatewayManager(
     }
 
     private fun resolveEndpoint(config: GatewayConnectionConfig): ResolvedEndpoint {
-        val endpoint = config.endpoint?.takeIf { it.isNotBlank() }
-        val defaultHost = "127.0.0.1"
-        val defaultPort = 7777
-        if (endpoint == null) {
-            return ResolvedEndpoint(defaultHost, defaultPort)
+        return when (config.medium) {
+            GatewayConnectionMedium.CABLE -> {
+                val endpoint = config.endpoint?.takeIf { it.isNotBlank() }
+                val defaultHost = "127.0.0.1"
+                val defaultPort = 7777
+                if (endpoint == null) {
+                    ResolvedEndpoint.Tcp(defaultHost, defaultPort)
+                } else {
+                    val parts = endpoint.split(":")
+                    if (parts.size == 2) {
+                        val host = parts[0].ifBlank { defaultHost }
+                        val port = parts[1].toIntOrNull() ?: defaultPort
+                        ResolvedEndpoint.Tcp(host, port)
+                    } else {
+                        ResolvedEndpoint.Tcp(endpoint, defaultPort)
+                    }
+                }
+            }
+            GatewayConnectionMedium.BLUETOOTH -> {
+                val adapter = BluetoothAdapter.getDefaultAdapter()
+                    ?: throw IllegalStateException("Bluetooth indisponível no dispositivo")
+                val address = config.endpoint?.takeIf { it.isNotBlank() }
+                    ?: throw IllegalStateException("Nenhum dispositivo Bluetooth configurado")
+                val device = try {
+                    adapter.getRemoteDevice(address)
+                } catch (t: IllegalArgumentException) {
+                    throw IllegalStateException("Endereço Bluetooth inválido: $address", t)
+                }
+                val displayName = try {
+                    device.name
+                } catch (_: SecurityException) {
+                    null
+                }
+                ResolvedEndpoint.Bluetooth(device, displayName)
+            }
         }
-        val parts = endpoint.split(":")
-        return if (parts.size == 2) {
-            val host = parts[0].ifBlank { defaultHost }
-            val port = parts[1].toIntOrNull() ?: defaultPort
-            ResolvedEndpoint(host, port)
-        } else {
-            ResolvedEndpoint(endpoint, defaultPort)
+    }
+
+    private fun ResolvedEndpoint.describe(): String = when (this) {
+        is ResolvedEndpoint.Tcp -> "$host:$port"
+        is ResolvedEndpoint.Bluetooth -> {
+            val label = displayName?.takeIf { it.isNotBlank() }
+            label?.let { "$it (${device.address})" } ?: device.address
         }
     }
 
@@ -340,8 +423,12 @@ class RaspberryGatewayManager(
         }
     }
 
-    data class ResolvedEndpoint(val host: String, val port: Int)
-
+    sealed class ResolvedEndpoint {
+        data class Tcp(val host: String, val port: Int) : ResolvedEndpoint()
+        data class Bluetooth(val device: BluetoothDevice, val displayName: String?) : ResolvedEndpoint() {
+            val address: String get() = device.address
+        }
+    }
     data class GatewayEnvelope(val type: String, val payload: JsonElement?)
 
     data class GatewayHelloAckPayload(
@@ -379,6 +466,7 @@ class RaspberryGatewayManager(
         private const val TAG = "GatewayManager"
         private const val SOCKET_CONNECT_TIMEOUT_MS = 5_000
         private const val SOCKET_READ_TIMEOUT_MS = 0 // blocking
+        private val GATEWAY_BLUETOOTH_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
         private val DEFAULT_CAPABILITIES = GatewayCapabilities(
             supportsProgramUpdates = true,

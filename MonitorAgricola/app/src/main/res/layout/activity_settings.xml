@@ -36,6 +36,35 @@
 
         </RadioGroup>
 
+        <TextView
+            android:id="@+id/tvGatewaySectionTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/settings_gateway_section_title"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnGatewayConnect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/settings_gateway_connect_button" />
+
+        <TextView
+            android:id="@+id/tvGatewayDevice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/settings_gateway_selected_device_default" />
+
+        <TextView
+            android:id="@+id/tvGatewayStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/settings_gateway_status_disconnected" />
+
         <Button
             android:id="@+id/btnSalvar"
             android:layout_width="match_parent"

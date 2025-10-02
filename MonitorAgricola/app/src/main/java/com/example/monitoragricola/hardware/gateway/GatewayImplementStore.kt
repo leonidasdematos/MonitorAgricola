@@ -89,7 +89,10 @@ class GatewayImplementStore(private val context: Context) {
 
         val hitchDistance = info.hitchToToolMeters?.toFloat()
 
-        val endpointString = "${endpoint.host}:${endpoint.port}"
+        val endpointString = when (endpoint) {
+            is RaspberryGatewayManager.ResolvedEndpoint.Tcp -> "${endpoint.host}:${endpoint.port}"
+            is RaspberryGatewayManager.ResolvedEndpoint.Bluetooth -> endpoint.address
+        }
 
         return Implemento(
             id = id,
@@ -127,7 +130,11 @@ class GatewayImplementStore(private val context: Context) {
     }
 
     private fun generateId(endpoint: RaspberryGatewayManager.ResolvedEndpoint): Int {
-        val hash = abs("${endpoint.host}:${endpoint.port}".hashCode())
+        val key = when (endpoint) {
+            is RaspberryGatewayManager.ResolvedEndpoint.Tcp -> "${endpoint.host}:${endpoint.port}"
+            is RaspberryGatewayManager.ResolvedEndpoint.Bluetooth -> endpoint.address
+        }
+        val hash = abs(key.hashCode())
         return ID_OFFSET + (hash % ID_MOD)
     }
 

@@ -96,6 +96,7 @@ import com.example.monitoragricola.raster.store.JobRasterMetadata
 import com.example.monitoragricola.raster.store.RasterTileCoord
 import com.example.monitoragricola.hardware.gateway.ExternalGatewayPositionProvider
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionConfig
+import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
 import com.example.monitoragricola.hardware.gateway.toGatewayConfiguration
 import com.example.monitoragricola.map.ImplementoBase.ExternalTelemetry
@@ -2492,12 +2493,14 @@ class MainActivity : AppCompatActivity() {
         latestPose = null
 
         val snapshot = lastAppliedImplementoSnapshot
+        val storedSelection = GatewayConnectionPreferences.loadSelection(this)
         val config = if (snapshot != null && snapshot.hardwareManaged) {
             val medium = GatewayConnectionMedium.fromStorageKey(snapshot.hardwareTransport)
             val endpoint = snapshot.hardwareEndpoint?.let { endpoint ->
                 if (endpoint.isBlank()) null else endpoint
             }
-            GatewayConnectionConfig(medium = medium, endpoint = endpoint)
+            GatewayConnectionPreferences.toConnectionConfig(storedSelection)
+                ?: GatewayConnectionConfig.default()
         } else {
             GatewayConnectionConfig.default()
         }
