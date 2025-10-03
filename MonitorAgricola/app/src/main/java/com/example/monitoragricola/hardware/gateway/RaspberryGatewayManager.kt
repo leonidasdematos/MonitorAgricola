@@ -9,6 +9,7 @@ import android.util.Log
 import com.example.monitoragricola.gps.api.GpsPose
 import com.example.monitoragricola.gps.api.SOURCE_EXTERNAL_GATEWAY
 import com.google.gson.Gson
+import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.annotations.SerializedName
@@ -36,6 +37,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.min
 
 
 sealed class GatewayConnectionState {
@@ -262,7 +264,12 @@ class RaspberryGatewayManager(
         reader: BufferedReader,
         writer: BufferedWriter,
     ) {
-        sendMessage(writer, "HELLO", JsonObject())
+        val helloPayload = JsonObject().apply {
+            val subscribeArray = JsonArray().apply { add("telemetry/rtk") }
+            add("subscribe", subscribeArray)
+            add("subscriptions", JsonArray().apply { add("telemetry/rtk") })
+        }
+        sendMessage(writer, "HELLO", helloPayload)
 
         var helloAck: GatewayHelloAckPayload? = null
         while (helloAck == null) {
@@ -296,11 +303,159 @@ class RaspberryGatewayManager(
             when (envelope.type) {
                 "PING" -> sendMessage(writer, "PONG", JsonObject())
                 "INFO" -> handleInfo(envelope.payload, config, endpoint)
+                "GNSS_FIX" -> handleGnssFix(envelope.payload, writer)
                 else -> Log.d(TAG, "Mensagem não tratada: ${envelope.type}")
             }
         }
         Log.i(TAG, "Loop do gateway encerrado")
     }
+
+    private suspend fun handleGnssFix(payload: JsonElement?, writer: BufferedWriter) {
+        val obj = payload?.takeIf { it.isJsonObject }?.asJsonObject
+        val sequence = obj?.get("sequence")?.let { element -> element.asLongOrNull() }
+        var status = "ok"
+        if (obj == null) {
+            status = "invalid_payload"
+            Log.w(TAG, "GNSS_FIX com payload inválido: $payload")
+        } else {
+            try {
+                val latitude = obj.get("latitude")?.asDoubleOrNull()
+                val longitude = obj.get("longitude")?.asDoubleOrNull()
+                if (latitude == null || longitude == null) {
+                    throw IllegalArgumentException("GNSS_FIX sem latitude/longitude")
+                }
+                val timestamp = obj.get("timestamp_ms")?.asLongOrNull()
+                    ?: System.currentTimeMillis()
+                val heading = obj.get("heading_deg")?.asDoubleOrNull()
+                    ?: obj.get("heading")?.asDoubleOrNull()
+                    ?: 0.0
+                val speed = obj.get("speed_mps")?.asDoubleOrNull()
+                    ?: obj.get("speed")?.asDoubleOrNull()
+                    ?: 0.0
+                val accuracy = obj.get("accuracy_m")?.asDoubleOrNull()
+                    ?: obj.get("accuracy")?.asDoubleOrNull()
+                    ?: 0.0
+
+                val pose = GpsPose(
+                    latitude = latitude,
+                    longitude = longitude,
+                    headingDeg = heading,
+                    speedMps = speed,
+                    accuracyM = accuracy,
+                    timestampMillis = timestamp,
+                    source = SOURCE_EXTERNAL_GATEWAY,
+                )
+                scope.launch { _poseFlow.emit(pose) }
+
+                obj.getAsJsonObject("implement")?.let { implement ->
+                    val isActive = implement.get("active")?.asBooleanOrNull() ?: false
+                    val sectionsMask = if (isActive) {
+                        parseSectionsMask(implement.getAsJsonArray("sections"))
+                    } else {
+                        0
+                    }
+                    val rate = implement.get("rate_value")?.asFloatOrNull()
+                        ?: implement.get("rate")?.asFloatOrNull()
+                        ?: implement.get("rate_lph")?.asFloatOrNull()
+
+                    _implementTelemetry.value = GatewayImplementTelemetry(
+                        isImplementActive = isActive,
+                        activeSectionsMask = sectionsMask,
+                        rateValue = rate,
+                        timestampMillis = timestamp,
+                    )
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                Log.w(TAG, "Falha ao processar GNSS_FIX", t)
+                status = "error"
+            }
+        }
+
+        if (sequence != null) {
+            val ackPayload = JsonObject().apply {
+                addProperty("sequence", sequence)
+                addProperty("status", status)
+                addProperty("timestamp_ms", System.currentTimeMillis())
+            }
+            sendMessage(writer, "GNSS_ACK", ackPayload)
+        } else {
+            Log.w(TAG, "GNSS_FIX recebido sem sequence: $payload")
+        }
+    }
+
+    private fun parseSectionsMask(array: JsonArray?): Int {
+        if (array == null) return 0
+        var mask = 0
+        val count = min(array.size(), 32)
+        for (index in 0 until count) {
+            val element = array[index]
+            val active = when {
+                element.isJsonPrimitive -> {
+                    val primitive = element.asJsonPrimitive
+                    when {
+                        primitive.isBoolean -> primitive.asBoolean
+                        primitive.isNumber -> primitive.asInt != 0
+                        primitive.isString -> primitive.asString.toIntOrNull()?.let { it != 0 } ?: false
+                        else -> false
+                    }
+                }
+                else -> false
+            }
+            if (active) {
+                mask = mask or (1 shl index)
+            }
+        }
+        return mask
+    }
+
+    private fun JsonElement.asLongOrNull(): Long? = when {
+        !isJsonPrimitive -> null
+        else -> try {
+            val primitive = asJsonPrimitive
+            when {
+                primitive.isNumber -> primitive.asLong
+                primitive.isString -> primitive.asString.toLongOrNull()
+                else -> null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun JsonElement.asDoubleOrNull(): Double? = when {
+        !isJsonPrimitive -> null
+        else -> try {
+            val primitive = asJsonPrimitive
+            when {
+                primitive.isNumber -> primitive.asDouble
+                primitive.isString -> primitive.asString.toDoubleOrNull()
+                else -> null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun JsonElement.asFloatOrNull(): Float? = asDoubleOrNull()?.toFloat()
+
+    private fun JsonElement.asBooleanOrNull(): Boolean? = when {
+        !isJsonPrimitive -> null
+        else -> try {
+            val primitive = asJsonPrimitive
+            when {
+                primitive.isBoolean -> primitive.asBoolean
+                primitive.isNumber -> primitive.asInt != 0
+                primitive.isString -> primitive.asString.toBooleanStrictOrNull()
+                    ?: primitive.asString.toIntOrNull()?.let { it != 0 }
+                else -> null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
 
     private suspend fun handleInfo(payload: JsonElement?, config: GatewayConnectionConfig, endpoint: ResolvedEndpoint) {
         if (payload == null || !payload.isJsonObject) {
@@ -404,11 +559,23 @@ class RaspberryGatewayManager(
 
     private fun parseCapabilities(caps: List<String>): GatewayCapabilities {
         val normalized = caps.map { it.lowercase() }.toSet()
+        val supportsProgramUpdates = normalized.any { entry ->
+            entry == "program_update" || entry == "program_updates"
+        }
+        val supportsTelemetry = normalized.any { entry ->
+            entry == "telemetry" || entry.startsWith("telemetry/")
+        }
+        val supportsIsoBus = normalized.any { entry ->
+            entry == "isobus"
+        }
+        val supportsSectionControl = normalized.any { entry ->
+            entry == "section_control" || entry == "section-control"
+        }
         return GatewayCapabilities(
-            supportsProgramUpdates = normalized.contains("program_update") || normalized.contains("program_updates"),
-            supportsTelemetry = normalized.contains("telemetry"),
-            supportsIsoBus = normalized.contains("isobus"),
-            supportsSectionControl = normalized.contains("section_control") || normalized.contains("section-control"),
+            supportsProgramUpdates = supportsProgramUpdates,
+            supportsTelemetry = supportsTelemetry,
+            supportsIsoBus = supportsIsoBus,
+            supportsSectionControl = supportsSectionControl,
         )
     }
 
