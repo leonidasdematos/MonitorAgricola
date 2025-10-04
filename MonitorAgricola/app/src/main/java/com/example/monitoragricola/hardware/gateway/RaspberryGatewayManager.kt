@@ -313,7 +313,7 @@ class RaspberryGatewayManager(
     private suspend fun handleGnssFix(payload: JsonElement?, writer: BufferedWriter) {
         val obj = payload?.takeIf { it.isJsonObject }?.asJsonObject
         val sequence = obj?.get("sequence")?.let { element -> element.asLongOrNull() }
-        var status = "ok"
+        var status = "accepted"
         if (obj == null) {
             status = "invalid_payload"
             Log.w(TAG, "GNSS_FIX com payload inválido: $payload")
