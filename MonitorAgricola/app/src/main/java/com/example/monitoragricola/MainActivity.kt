@@ -231,7 +231,11 @@ class MainActivity : AppCompatActivity() {
 
     private var lastPoint: GeoPoint? = null
     private var interpolatedPosition: GeoPoint? = null
-    private val interpolationFactor = 0.2f
+    @Volatile private var previousPose: GpsPose? = null
+    private var poseAnimationStartRealtime: Long = 0L
+    private var poseAnimationDurationMillis: Long = 0L
+    private val interpolationFallbackFactor = 0.2f
+
     private var lastHeading: Float = 0f
 
     private var keptRunningInBackground = false
@@ -248,7 +252,7 @@ class MainActivity : AppCompatActivity() {
     private var gpsPoseJob: Job? = null
     private var gatewayTelemetryJob: Job? = null
     private var gatewaySyncJob: Job? = null
-    private var latestPose: GpsPose? = null
+    @Volatile private var latestPose: GpsPose? = null
     private var gpsFilterSettings: GpsFilterSettings = GpsFilterSettings()
 
     private var lastSpeedCalcTime: Long = 0
@@ -1237,6 +1241,30 @@ class MainActivity : AppCompatActivity() {
         lastViewport = null
         scheduleViewportUpdate()
     }
+
+    private fun clearPoseHistory(resetInterpolation: Boolean = false) {
+        previousPose = null
+        latestPose = null
+        poseAnimationStartRealtime = 0L
+        poseAnimationDurationMillis = 0L
+        if (resetInterpolation) {
+            interpolatedPosition = null
+        }
+    }
+
+    private fun recordPose(pose: GpsPose) {
+        val current = latestPose
+        if (current != null && pose.source == current.source && pose.timestampMillis > current.timestampMillis) {
+            previousPose = current
+            poseAnimationDurationMillis = pose.timestampMillis - current.timestampMillis
+        } else {
+            previousPose = null
+            poseAnimationDurationMillis = 0L
+        }
+        poseAnimationStartRealtime = SystemClock.elapsedRealtime()
+        latestPose = pose
+    }
+
     private fun startMapUpdates() {
         startViewportUpdates()
         handler.post(object : Runnable {
@@ -1259,12 +1287,34 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
                     }
 
-                    interpolatedPosition = interpolatedPosition?.let {
-                        val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
-                        val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
+                    val previousPoseSnapshot = previousPose
+                    val duration = poseAnimationDurationMillis
+                    val timeInterpolated = if (
+                        poseSnapshot != null &&
+                        previousPoseSnapshot != null &&
+                        duration > 0L &&
+                        poseSnapshot.source == previousPoseSnapshot.source
+                    ) {
+                        val elapsedRealtime = (frameStart - poseAnimationStartRealtime).coerceAtLeast(0L)
+                        val progress = (elapsedRealtime.toDouble() / duration).coerceIn(0.0, 1.0)
+                        val lat = previousPoseSnapshot.latitude +
+                                (poseSnapshot.latitude - previousPoseSnapshot.latitude) * progress
+                        val lon = previousPoseSnapshot.longitude +
+                                (poseSnapshot.longitude - previousPoseSnapshot.longitude) * progress
                         GeoPoint(lat, lon)
-                    } ?: pos
+                    } else {
+                        null
+                    }
 
+                    interpolatedPosition = when {
+                        timeInterpolated != null -> timeInterpolated
+                        poseSnapshot != null -> GeoPoint(poseSnapshot.latitude, poseSnapshot.longitude)
+                        else -> interpolatedPosition?.let {
+                            val lat = it.latitude + interpolationFallbackFactor * (pos.latitude - it.latitude)
+                            val lon = it.longitude + interpolationFallbackFactor * (pos.longitude - it.longitude)
+                            GeoPoint(lat, lon)
+                        } ?: pos
+                    }
                     val currentPos = interpolatedPosition!!
                     tractor.position = currentPos
 
@@ -2463,11 +2513,11 @@ class MainActivity : AppCompatActivity() {
         filteredDeviceProvider = provider
         positionProvider = provider
         simulatorProvider = null
-        latestPose = null
+        clearPoseHistory(resetInterpolation = true)
 
         gpsPoseJob = lifecycleScope.launch {
             provider.poses.collectLatest { pose ->
-                latestPose = pose
+                recordPose(pose)
                 lastPositionMillis = pose.timestampMillis
                 speedEmaKmh = pose.speedMps * 3.6
             }
@@ -2490,7 +2540,7 @@ class MainActivity : AppCompatActivity() {
         positionProvider = provider
         simulatorProvider = null
         filteredDeviceProvider = null
-        latestPose = null
+        clearPoseHistory(resetInterpolation = true)
 
         val snapshot = lastAppliedImplementoSnapshot
         val storedSelection = GatewayConnectionPreferences.loadSelection(this)
@@ -2527,7 +2577,7 @@ class MainActivity : AppCompatActivity() {
 
         gpsPoseJob = lifecycleScope.launch {
             provider.poses.collectLatest { pose ->
-                latestPose = pose
+                recordPose(pose)
                 lastPositionMillis = pose.timestampMillis
                 speedEmaKmh = pose.speedMps * 3.6
                 updateGpsAccuracyIndicator(pose)
@@ -2556,7 +2606,7 @@ class MainActivity : AppCompatActivity() {
             gatewayManager.disconnect()
             (activeImplemento as? ImplementoBase)?.updateExternalTelemetry(null)
         }
-        latestPose = null
+        clearPoseHistory(resetInterpolation = true)
         updateGpsAccuracyIndicator(null)
     }
 
