@@ -1409,26 +1409,36 @@ class MainActivity : AppCompatActivity() {
                         resetImplementTrackingState()
                     }
 
-                    if (headingInterpolated != null) {
-                        lastHeading = headingInterpolated
+                    var headingForFrame = headingInterpolated
+                    if (headingForFrame != null) {
+                        lastHeading = headingForFrame
                         if (followTractor) {
                             map.setMapOrientation(-lastHeading)
                         }
                     } else {
-                        lastPoint?.let { last ->
+                        val fallbackHeading = lastPoint?.let { last ->
                             val dist = last.distanceToAsDouble(currentPos)
                             if (dist > 0.01) {
-                                val heading = calculateBearing(last, currentPos)
-                                val diff = ((heading - lastHeading + 540) % 360) - 180
-                                if (abs(diff) > 0.1f && followTractor) {
+                                calculateBearing(last, currentPos)
+                            } else {
+                                null
+                            }
+                        }
+                        if (fallbackHeading != null) {
+                            if (followTractor) {
+                                val diff = ((fallbackHeading - lastHeading + 540) % 360) - 180
+                                if (abs(diff) > 0.1f) {
                                     lastHeading = (lastHeading + diff + 360) % 360
                                     map.setMapOrientation(-lastHeading)
                                 }
                             }
+                            headingForFrame = fallbackHeading
                         }
                     }
 
-                    implBase?.updateBarPreview(lastPoint, currentPos, headingInterpolated)
+                    val headingForImplement = headingForFrame ?: lastHeading
+
+                    implBase?.updateBarPreview(lastPoint, currentPos, headingForImplement)
 
                     if (followTractor) {
                         map.controller.setCenter(currentPos)
@@ -1449,7 +1459,7 @@ class MainActivity : AppCompatActivity() {
                                 lon = currentPos.longitude,
                                 tMillis = System.currentTimeMillis(),
                                 speedKmh = poseSnapshot?.speedMps?.times(3.6)?.toFloat(),
-                                headingDeg = headingInterpolated ?: lastHeading
+                                headingDeg = headingForFrame ?: lastHeading
                             )
                         }
                     }
