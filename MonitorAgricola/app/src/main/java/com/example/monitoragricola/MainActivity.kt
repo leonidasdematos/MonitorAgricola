@@ -1431,6 +1431,8 @@ class MainActivity : AppCompatActivity() {
                                     lastHeading = (lastHeading + diff + 360) % 360
                                     map.setMapOrientation(-lastHeading)
                                 }
+                            } else {
+                                lastHeading = fallbackHeading
                             }
                             headingForFrame = fallbackHeading
                         }
