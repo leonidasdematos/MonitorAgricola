@@ -96,8 +96,9 @@ import com.example.monitoragricola.raster.store.JobRasterMetadata
 import com.example.monitoragricola.raster.store.RasterTileCoord
 import com.example.monitoragricola.hardware.gateway.ExternalGatewayPositionProvider
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionConfig
-import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
+import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
+import com.example.monitoragricola.hardware.gateway.GatewayPoseInterpolator
 import com.example.monitoragricola.hardware.gateway.toGatewayConfiguration
 import com.example.monitoragricola.map.ImplementoBase.ExternalTelemetry
 import org.osmdroid.tileprovider.tilesource.ITileSource
@@ -231,6 +232,7 @@ class MainActivity : AppCompatActivity() {
 
     private var lastPoint: GeoPoint? = null
     private var interpolatedPosition: GeoPoint? = null
+    private var gatewayPoseInterpolator: GatewayPoseInterpolator? = null
     private val interpolationFactor = 0.2f
     private var lastHeading: Float = 0f
 
@@ -1250,6 +1252,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 positionProvider?.getCurrentPosition()?.let { pos ->
                     val poseSnapshot = latestPose
+                    val smoothingResult = if (positionProvider === externalGatewayProvider) {
+                        gatewayPoseInterpolator?.current(now)
+                    } else {
+                        null
+                    }
                     val poseMillis = poseSnapshot?.timestampMillis
                     val latestMillis = listOfNotNull(poseMillis, rawFixMillis.takeIf { it > 0L }).maxOrNull()
                     lastPositionMillis = latestMillis ?: if (lastPositionMillis > 0L) lastPositionMillis else now
@@ -1259,16 +1266,19 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
                     }
 
-                    interpolatedPosition = interpolatedPosition?.let {
+                    val nextPosition = smoothingResult?.position ?: interpolatedPosition?.let {
                         val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
                         val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
                         GeoPoint(lat, lon)
                     } ?: pos
 
+                    interpolatedPosition = nextPosition
+
                     val currentPos = interpolatedPosition!!
                     tractor.position = currentPos
 
-                    val headingFromPose = poseSnapshot?.headingDeg?.toFloat()
+                    val headingFromPose = smoothingResult?.headingDeg?.toFloat()
+                        ?: poseSnapshot?.headingDeg?.toFloat()
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
                         val lon = currentPos.longitude
@@ -1300,7 +1310,12 @@ class MainActivity : AppCompatActivity() {
                     val skipRasterOps = suspendRasterUpdates > 0
                     // Mantém a geometria atualizada sempre e apenas pausa a pintura/telemetria.
                     implBase?.setRasterSuspended(skipRasterOps)
-                    activeImplemento?.updatePosition(lastPoint, currentPos)
+                    activeImplemento?.updatePosition(
+                        last = lastPoint,
+                        current = currentPos,
+                        headingDeg = headingFromPose,
+                        speedMps = poseSnapshot?.speedMps?.toFloat(),
+                    )
 
                     if (headingFromPose != null) {
                         lastHeading = headingFromPose
@@ -1320,7 +1335,6 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-
                     if (followTractor) {
                         map.controller.setCenter(currentPos)
                         scheduleViewportUpdate()
@@ -1368,6 +1382,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                     updateImplementBarOverlay(lastPoint, currentPos)
+
                     lastPoint = currentPos
                 }
 
@@ -1916,6 +1931,8 @@ class MainActivity : AppCompatActivity() {
     private fun updateImplementBarOverlay(lastGps: GeoPoint?, currentGps: GeoPoint) {
         val implBase = activeImplemento as? ImplementoBase ?: return
 
+        Log.d("currentpos", currentGps.toString())
+
         val bar = implBase.getImplementBarEndpoints() ?: return
         val (gp1, gp2) = bar
 
@@ -2434,6 +2451,7 @@ class MainActivity : AppCompatActivity() {
             "simulador" -> {
                 simulatorProvider = TractorSimulatorProvider(map, tractor)
                 positionProvider = simulatorProvider
+                gatewayPoseInterpolator = null
                 activeImplemento?.let { simulatorProvider?.setImplemento(it) }
                 positionProvider?.start()
                 updateGpsAccuracyIndicator(latestPose)
@@ -2463,6 +2481,7 @@ class MainActivity : AppCompatActivity() {
         filteredDeviceProvider = provider
         positionProvider = provider
         simulatorProvider = null
+        gatewayPoseInterpolator = null
         latestPose = null
 
         gpsPoseJob = lifecycleScope.launch {
@@ -2491,6 +2510,8 @@ class MainActivity : AppCompatActivity() {
         simulatorProvider = null
         filteredDeviceProvider = null
         latestPose = null
+        gatewayPoseInterpolator = GatewayPoseInterpolator().also { it.reset() }
+        interpolatedPosition = null
 
         val snapshot = lastAppliedImplementoSnapshot
         val storedSelection = GatewayConnectionPreferences.loadSelection(this)
@@ -2530,6 +2551,7 @@ class MainActivity : AppCompatActivity() {
                 latestPose = pose
                 lastPositionMillis = pose.timestampMillis
                 speedEmaKmh = pose.speedMps * 3.6
+                gatewayPoseInterpolator?.onPose(pose)
                 updateGpsAccuracyIndicator(pose)
             }
         }
@@ -2552,6 +2574,9 @@ class MainActivity : AppCompatActivity() {
         externalGatewayProvider?.stop()
         externalGatewayProvider = null
         if (isGatewayProvider) {
+            gatewayPoseInterpolator = null
+            interpolatedPosition = null
+
             lifecycleScope.launch { gatewayManager.clearImplementConfiguration() }
             gatewayManager.disconnect()
             (activeImplemento as? ImplementoBase)?.updateExternalTelemetry(null)

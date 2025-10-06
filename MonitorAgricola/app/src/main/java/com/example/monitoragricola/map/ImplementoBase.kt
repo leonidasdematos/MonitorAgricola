@@ -4,9 +4,11 @@ import android.util.Log
 import com.example.monitoragricola.raster.RasterCoverageEngine
 import org.locationtech.jts.geom.Coordinate
 import org.osmdroid.util.GeoPoint
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.sin
 
 
@@ -102,7 +104,22 @@ abstract class ImplementoBase(
         rasterSuspended = suspended
     }
 
-    override fun updatePosition(last: GeoPoint?, current: GeoPoint) {
+    private fun minHeadingStep(speedMps: Float?, hasExternalHeading: Boolean): Double {
+        val speed = speedMps?.let { abs(it) } ?: return EPS_STEP
+        return when {
+            speed < 0.05f -> if (hasExternalHeading) Double.POSITIVE_INFINITY else 0.15
+            speed < 0.2f -> 0.08
+            speed < 0.5f -> 0.03
+            else -> EPS_STEP
+        }
+    }
+
+    override fun updatePosition(
+        last: GeoPoint?,
+        current: GeoPoint,
+        headingDeg: Float?,
+        speedMps: Float?,
+    ) {
         if (last == null){ return }
 
         val proj = ProjectionHelper(current.latitude, current.longitude)
@@ -114,12 +131,17 @@ abstract class ImplementoBase(
         val dist = hypot(vx, vy)
 
         // Atualize o heading SEMPRE que houver qualquer variação mensurável
-        if (dist > 1e-9) {
+        val headingRadFromPose = headingDeg?.toDouble()?.let { Math.toRadians(it.toDouble()) }
+        headingRadFromPose?.let { lastHeadingRad = it }
+
+        val headingStep = minHeadingStep(speedMps, headingRadFromPose != null)
+        val useDisplacementForHeading = dist >= headingStep
+        if (useDisplacementForHeading) {
             lastHeadingRad = atan2(vy, vx) // x=leste, y=norte (0° = norte)
         }
 
-        // Defina fwd/right sem dar return precoce
-        val (fwdX, fwdY) = if (dist >= EPS_STEP) {
+        val vectorThreshold = max(EPS_STEP, headingStep)
+        val (fwdX, fwdY) = if (dist >= vectorThreshold) {
             (vx / dist) to (vy / dist)
         } else {
             // Passo muito pequeno: use o heading cacheado; se não houver, assuma norte
@@ -187,7 +209,8 @@ abstract class ImplementoBase(
         val telemetry = latestExternalTelemetry
         val implementActive = telemetry?.isImplementActive ?: true
 
-        if (running && !rasterSuspended && implementActive && dImpl >= EPS_IMPL) {            val lastImplLL = proj.toLatLon(lastImplLocal)
+        if (running && !rasterSuspended && implementActive && dImpl >= EPS_IMPL) {
+            val lastImplLL = proj.toLatLon(lastImplLocal)
             val curImplLL2 = proj.toLatLon(curImplLocal)
             val lastImpl = GeoPoint(lastImplLL.latitude, lastImplLL.longitude)
             val curImpl  = GeoPoint(curImplLL2.latitude,  curImplLL2.longitude)

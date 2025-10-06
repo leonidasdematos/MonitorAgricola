@@ -10,7 +10,18 @@ interface Implemento {
     fun stop()
 
     /** Atualiza a posição do implemento com base na movimentação do trator */
-    fun updatePosition(last: GeoPoint?, current: GeoPoint)
+    /**
+     * Atualiza a posição do implemento com base na movimentação do trator.
+     *
+     * @param headingDeg rumo (0º = leste) fornecido externamente, se houver
+     * @param speedMps velocidade do trator em m/s, usada para filtrar ruído em heading
+     */
+    fun updatePosition(
+        last: GeoPoint?,
+        current: GeoPoint,
+        headingDeg: Float? = null,
+        speedMps: Float? = null,
+    )
 
     /** Retorna informações do implemento, ex: largura, linhas, tipo */
     fun getStatus(): Map<String, Any>
