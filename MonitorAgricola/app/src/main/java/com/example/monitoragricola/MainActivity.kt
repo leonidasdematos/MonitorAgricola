@@ -230,15 +230,8 @@ class MainActivity : AppCompatActivity() {
     private var lastViewportUpdate = 0L
 
     private var lastPoint: GeoPoint? = null
-    private var lastImplementFix: GeoPoint? = null
-    private var lastImplementFixTimestamp: Long = 0L
     private var interpolatedPosition: GeoPoint? = null
-    @Volatile private var previousPose: GpsPose? = null
-    @Volatile private var previousPoseHeading: Float? = null
-    private var poseAnimationStartRealtime: Long = 0L
-    private var poseAnimationDurationMillis: Long = 0L
-    private val interpolationFallbackFactor = 0.2f
-
+    private val interpolationFactor = 0.2f
     private var lastHeading: Float = 0f
 
     private var keptRunningInBackground = false
@@ -255,8 +248,7 @@ class MainActivity : AppCompatActivity() {
     private var gpsPoseJob: Job? = null
     private var gatewayTelemetryJob: Job? = null
     private var gatewaySyncJob: Job? = null
-    @Volatile private var latestPose: GpsPose? = null
-    @Volatile private var latestPoseHeading: Float? = null
+    private var latestPose: GpsPose? = null
     private var gpsFilterSettings: GpsFilterSettings = GpsFilterSettings()
 
     private var lastSpeedCalcTime: Long = 0
@@ -441,24 +433,24 @@ class MainActivity : AppCompatActivity() {
                 }
 
 
-            if (job == null) {
-                Toast.makeText(this@MainActivity, "Trabalho não encontrado.", Toast.LENGTH_SHORT).show()
-            } else {
-                // força snapshot do job e persiste seleção
-                selectImplementoFromJob(job)
-                selectedJobId = job.id
-                ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
+                if (job == null) {
+                    Toast.makeText(this@MainActivity, "Trabalho não encontrado.", Toast.LENGTH_SHORT).show()
+                } else {
+                    // força snapshot do job e persiste seleção
+                    selectImplementoFromJob(job)
+                    selectedJobId = job.id
+                    ImplementosPrefs.setSelectedJobId(this@MainActivity, job.id)
                     // Restaura cobertura raster no mapa (pausado)
-                restoreRasterOnMap(job.id)
+                    restoreRasterOnMap(job.id)
 
-                btnLigar.setImageResource(android.R.drawable.ic_media_play)
-                refreshJobsButtonColor()
-                refreshImplementosButtonColor()
-                refreshPlayButtonColor()
-                refreshJobState()
-                Toast.makeText(this@MainActivity, "Trabalho selecionado (aguardando ▶).", Toast.LENGTH_SHORT).show()
-                clearResumeExtras()
-            }
+                    btnLigar.setImageResource(android.R.drawable.ic_media_play)
+                    refreshJobsButtonColor()
+                    refreshImplementosButtonColor()
+                    refreshPlayButtonColor()
+                    refreshJobState()
+                    Toast.makeText(this@MainActivity, "Trabalho selecionado (aguardando ▶).", Toast.LENGTH_SHORT).show()
+                    clearResumeExtras()
+                }
                 syncPlayUi()
                 clearResumeExtras()
                 return@launch
@@ -476,7 +468,6 @@ class MainActivity : AppCompatActivity() {
                 } ?: run {
                     activeImplemento?.stop()
                     activeImplemento = null
-                    resetImplementTrackingState()
                     lastAppliedImplementoSnapshot = null
                     tvImplemento.text = "Nenhum implemento selecionado"
                 }
@@ -572,7 +563,6 @@ class MainActivity : AppCompatActivity() {
             activeImplemento = null
             lastAppliedImplementoSnapshot = null
             applyImplementToPositionSources(null)
-            resetImplementTrackingState()
         } else {
             tvImplemento.text = if (hasForced) "Implemento (Job): ${snap.nome}" else "Implemento: ${snap.nome}"
             lastAppliedImplementoSnapshot = snap
@@ -1247,43 +1237,6 @@ class MainActivity : AppCompatActivity() {
         lastViewport = null
         scheduleViewportUpdate()
     }
-
-    private fun clearPoseHistory(resetInterpolation: Boolean = false) {
-        previousPose = null
-        previousPoseHeading = null
-        latestPose = null
-        latestPoseHeading = null
-        poseAnimationStartRealtime = 0L
-        poseAnimationDurationMillis = 0L
-        resetImplementTrackingState()
-        if (resetInterpolation) {
-            interpolatedPosition = null
-        }
-    }
-
-    private fun resetImplementTrackingState() {
-        lastImplementFix = null
-        lastImplementFixTimestamp = 0L
-    }
-
-    private fun recordPose(pose: GpsPose) {
-        val current = latestPose
-        val currentHeading = latestPoseHeading
-        val nextHeading = pose.headingDeg?.toFloat()
-        if (current != null && pose.source == current.source && pose.timestampMillis > current.timestampMillis) {
-            previousPose = current
-            previousPoseHeading = currentHeading
-            poseAnimationDurationMillis = pose.timestampMillis - current.timestampMillis
-        } else {
-            previousPose = null
-            previousPoseHeading = null
-            poseAnimationDurationMillis = 0L
-        }
-        poseAnimationStartRealtime = SystemClock.elapsedRealtime()
-        latestPose = pose
-        latestPoseHeading = nextHeading
-    }
-
     private fun startMapUpdates() {
         startViewportUpdates()
         handler.post(object : Runnable {
@@ -1306,53 +1259,16 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
                     }
 
-                    val previousPoseSnapshot = previousPose
-                    val previousHeadingSnapshot = previousPoseHeading
-                    val latestHeadingSnapshot = latestPoseHeading
-                    val duration = poseAnimationDurationMillis
-                    var interpolationProgress: Double? = null
-                    val timeInterpolated = if (
-                        poseSnapshot != null &&
-                        previousPoseSnapshot != null &&
-                        duration > 0L &&
-                        poseSnapshot.source == previousPoseSnapshot.source
-                    ) {
-                        val elapsedRealtime = (frameStart - poseAnimationStartRealtime).coerceAtLeast(0L)
-                        val progress = (elapsedRealtime.toDouble() / duration).coerceIn(0.0, 1.0)
-                        interpolationProgress = progress
-                        val lat = previousPoseSnapshot.latitude +
-                                (poseSnapshot.latitude - previousPoseSnapshot.latitude) * progress
-                        val lon = previousPoseSnapshot.longitude +
-                                (poseSnapshot.longitude - previousPoseSnapshot.longitude) * progress
+                    interpolatedPosition = interpolatedPosition?.let {
+                        val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
+                        val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
                         GeoPoint(lat, lon)
-                    } else {
-                        null
-                    }
+                    } ?: pos
 
-                    interpolatedPosition = when {
-                        timeInterpolated != null -> timeInterpolated
-                        poseSnapshot != null -> GeoPoint(poseSnapshot.latitude, poseSnapshot.longitude)
-                        else -> interpolatedPosition?.let {
-                            val lat = it.latitude + interpolationFallbackFactor * (pos.latitude - it.latitude)
-                            val lon = it.longitude + interpolationFallbackFactor * (pos.longitude - it.longitude)
-                            GeoPoint(lat, lon)
-                        } ?: pos
-                    }
                     val currentPos = interpolatedPosition!!
                     tractor.position = currentPos
 
-                    val headingInterpolated = when {
-                        interpolationProgress != null &&
-                                previousHeadingSnapshot != null &&
-                                latestHeadingSnapshot != null -> {
-                            lerpHeadingDeg(
-                                previousHeadingSnapshot,
-                                latestHeadingSnapshot,
-                                interpolationProgress!!.toFloat()
-                            )
-                        }
-                        else -> latestHeadingSnapshot
-                    }
+                    val headingFromPose = poseSnapshot?.headingDeg?.toFloat()
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
                         val lon = currentPos.longitude
@@ -1386,61 +1302,24 @@ class MainActivity : AppCompatActivity() {
                     implBase?.setRasterSuspended(skipRasterOps)
                     activeImplemento?.updatePosition(lastPoint, currentPos)
 
-                    if (implBase != null) {
-                        val poseFix = poseSnapshot
-                        if (poseFix != null) {
-                            val fixPoint = GeoPoint(poseFix.latitude, poseFix.longitude)
-                            val previousFix = lastImplementFix
-                            val distanceToFix = previousFix?.distanceToAsDouble(fixPoint)
-                            val isNewFix = poseFix.timestampMillis != lastImplementFixTimestamp ||
-                                    previousFix == null ||
-                                    (distanceToFix != null && distanceToFix > 1e-6)
-                            if (isNewFix) {
-                                if (previousFix != null && (distanceToFix ?: 0.0) > 0.0) {
-                                    implBase.updatePosition(previousFix, fixPoint)
-                                }
-                                lastImplementFix = fixPoint
-                                lastImplementFixTimestamp = poseFix.timestampMillis
-                            }
-                        }
-                        implBase.updateBarPreview(lastPoint, currentPos, headingInterpolated)
-                    } else {
-                        activeImplemento?.updatePosition(lastPoint, currentPos)
-                        resetImplementTrackingState()
-                    }
-
-                    var headingForFrame = headingInterpolated
-                    if (headingForFrame != null) {
-                        lastHeading = headingForFrame
+                    if (headingFromPose != null) {
+                        lastHeading = headingFromPose
                         if (followTractor) {
                             map.setMapOrientation(-lastHeading)
                         }
                     } else {
-                        val fallbackHeading = lastPoint?.let { last ->
+                        lastPoint?.let { last ->
                             val dist = last.distanceToAsDouble(currentPos)
                             if (dist > 0.01) {
-                                calculateBearing(last, currentPos)
-                            } else {
-                                null
-                            }
-                        }
-                        if (fallbackHeading != null) {
-                            if (followTractor) {
-                                val diff = ((fallbackHeading - lastHeading + 540) % 360) - 180
-                                if (abs(diff) > 0.1f) {
+                                val heading = calculateBearing(last, currentPos)
+                                val diff = ((heading - lastHeading + 540) % 360) - 180
+                                if (abs(diff) > 0.1f && followTractor) {
                                     lastHeading = (lastHeading + diff + 360) % 360
                                     map.setMapOrientation(-lastHeading)
                                 }
-                            } else {
-                                lastHeading = fallbackHeading
                             }
-                            headingForFrame = fallbackHeading
                         }
                     }
-
-                    val headingForImplement = headingForFrame ?: lastHeading
-
-                    implBase?.updateBarPreview(lastPoint, currentPos, headingForImplement)
 
                     if (followTractor) {
                         map.controller.setCenter(currentPos)
@@ -1461,7 +1340,7 @@ class MainActivity : AppCompatActivity() {
                                 lon = currentPos.longitude,
                                 tMillis = System.currentTimeMillis(),
                                 speedKmh = poseSnapshot?.speedMps?.times(3.6)?.toFloat(),
-                                headingDeg = headingForFrame ?: lastHeading
+                                headingDeg = headingFromPose ?: lastHeading
                             )
                         }
                     }
@@ -1626,7 +1505,6 @@ class MainActivity : AppCompatActivity() {
         if (prevJobId != null && prevState != null) app.implementoStateStore.save(prevJobId, prevState)
 
         activeImplemento?.stop()
-        resetImplementTrackingState()
         activeImplemento = impl
         applyImplementToPositionSources(lastAppliedImplementoSnapshot)
 
@@ -1664,7 +1542,6 @@ class MainActivity : AppCompatActivity() {
             tvImplemento.text = "Nenhum implemento selecionado"
             map.invalidate()
             applyImplementToPositionSources(null)
-            resetImplementTrackingState()
         }
         refreshJobsButtonColor()
         refreshImplementosButtonColor()
@@ -1719,7 +1596,6 @@ class MainActivity : AppCompatActivity() {
                 } else if (lastAppliedImplementoSnapshot != null) {
                     activeImplemento?.stop()
                     activeImplemento = null
-                    resetImplementTrackingState()
                     lastAppliedImplementoSnapshot = null
                     tvImplemento.text = "Nenhum implemento selecionado"
                     if (::map.isInitialized) {
@@ -2023,14 +1899,6 @@ class MainActivity : AppCompatActivity() {
         if (followManualDisabled) return@Runnable
         updateFollowState(true, animate = false, forceRecenter = true)
     }
-
-    private fun lerpHeadingDeg(start: Float, end: Float, fraction: Float): Float {
-        val clamped = fraction.coerceIn(0f, 1f)
-        val delta = ((end - start + 540f) % 360f) - 180f
-        val result = start + delta * clamped
-        return ((result % 360f) + 360f) % 360f
-    }
-
 
     private fun calculateBearing(start: GeoPoint, end: GeoPoint): Float {
         val lat1 = Math.toRadians(start.latitude)
@@ -2595,11 +2463,11 @@ class MainActivity : AppCompatActivity() {
         filteredDeviceProvider = provider
         positionProvider = provider
         simulatorProvider = null
-        clearPoseHistory(resetInterpolation = true)
+        latestPose = null
 
         gpsPoseJob = lifecycleScope.launch {
             provider.poses.collectLatest { pose ->
-                recordPose(pose)
+                latestPose = pose
                 lastPositionMillis = pose.timestampMillis
                 speedEmaKmh = pose.speedMps * 3.6
             }
@@ -2622,7 +2490,7 @@ class MainActivity : AppCompatActivity() {
         positionProvider = provider
         simulatorProvider = null
         filteredDeviceProvider = null
-        clearPoseHistory(resetInterpolation = true)
+        latestPose = null
 
         val snapshot = lastAppliedImplementoSnapshot
         val storedSelection = GatewayConnectionPreferences.loadSelection(this)
@@ -2659,7 +2527,7 @@ class MainActivity : AppCompatActivity() {
 
         gpsPoseJob = lifecycleScope.launch {
             provider.poses.collectLatest { pose ->
-                recordPose(pose)
+                latestPose = pose
                 lastPositionMillis = pose.timestampMillis
                 speedEmaKmh = pose.speedMps * 3.6
                 updateGpsAccuracyIndicator(pose)
@@ -2688,7 +2556,7 @@ class MainActivity : AppCompatActivity() {
             gatewayManager.disconnect()
             (activeImplemento as? ImplementoBase)?.updateExternalTelemetry(null)
         }
-        clearPoseHistory(resetInterpolation = true)
+        latestPose = null
         updateGpsAccuracyIndicator(null)
     }
 
@@ -2775,7 +2643,7 @@ class MainActivity : AppCompatActivity() {
         interpolatedPosition = null
     }
     private fun refreshJobState() {
-    // roda em coroutine por dentro
+        // roda em coroutine por dentro
         val selId = selectedJobId ?: run {
             renderJobState(null, false); return
         }
@@ -3007,7 +2875,6 @@ class MainActivity : AppCompatActivity() {
 
         activeImplemento?.stop()
         activeImplemento = null
-        resetImplementTrackingState()
         routeRenderer = null
         pendingA = null
         pendingB = null
