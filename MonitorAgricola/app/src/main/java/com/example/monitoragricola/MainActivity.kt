@@ -1279,6 +1279,7 @@ class MainActivity : AppCompatActivity() {
 
                     val headingFromPose = smoothingResult?.headingDeg?.toFloat()
                         ?: poseSnapshot?.headingDeg?.toFloat()
+                    val mapHeadingFromPose = headingFromPose?.let { implementHeadingToBearing(it) }
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
                         val lon = currentPos.longitude
@@ -1317,8 +1318,8 @@ class MainActivity : AppCompatActivity() {
                         speedMps = poseSnapshot?.speedMps?.toFloat(),
                     )
 
-                    if (headingFromPose != null) {
-                        lastHeading = headingFromPose
+                    if (mapHeadingFromPose != null) {
+                        lastHeading = mapHeadingFromPose
                         if (followTractor) {
                             map.setMapOrientation(-lastHeading)
                         }
@@ -1913,6 +1914,13 @@ class MainActivity : AppCompatActivity() {
     private val followRunnable = Runnable {
         if (followManualDisabled) return@Runnable
         updateFollowState(true, animate = false, forceRecenter = true)
+    }
+
+    private fun implementHeadingToBearing(implementHeadingDeg: Float): Float {
+        var bearing = 0f - implementHeadingDeg
+        bearing %= 360f
+        if (bearing < 0f) bearing += 360f
+        return bearing
     }
 
     private fun calculateBearing(start: GeoPoint, end: GeoPoint): Float {

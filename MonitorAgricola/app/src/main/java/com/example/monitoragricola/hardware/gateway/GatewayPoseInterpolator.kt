@@ -3,148 +3,123 @@ package com.example.monitoragricola.hardware.gateway
 import android.os.SystemClock
 import com.example.monitoragricola.gps.api.GpsPose
 import org.osmdroid.util.GeoPoint
-import kotlin.math.PI
-import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.exp
-import kotlin.math.min
-import kotlin.math.sin
 
 /**
- * Realiza interpolação temporal das poses recebidas do gateway para suavizar
- * o movimento no mapa quando a frequência de amostragem é baixa.
+ * Realiza interpolação temporal das poses recebidas do gateway criando uma
+ * animação contínua entre a penúltima e a última pose conhecida. Dessa forma
+ * mantemos um pequeno atraso deliberado, permitindo atualizar o mapa em alta
+ * taxa de quadros mesmo quando a taxa de poses é baixa.
  */
 class GatewayPoseInterpolator(
-    private val smoothingTimeConstantSeconds: Double = 0.35,
-    private val maxExtrapolationSeconds: Double = 0.7,
+    private val maxSegmentDurationSeconds: Double = 1.0,
+    private val fallbackSegmentDurationSeconds: Double = 0.2,
 ) {
-    private var lastPose: GpsPose? = null
+    private var previousPose: GpsPose? = null
+    private var currentPose: GpsPose? = null
+    private var lastHeadingOutputDeg: Double? = null
 
-    private var smoothedLat = 0.0
-    private var smoothedLon = 0.0
-    private var hasSmoothedPosition = false
 
-    private var smoothedHeadingRad = 0.0
-    private var hasSmoothedHeading = false
-
-    private var lastFrameRealtime = 0L
-    private var hasFrameTime = false
+    private var segmentStartRealtime = 0L
+    private var segmentDurationMillis = DEFAULT_SEGMENT_DURATION_MS
 
     fun reset() {
-        lastPose = null
-        hasSmoothedPosition = false
-        hasSmoothedHeading = false
-        lastFrameRealtime = SystemClock.elapsedRealtime()
-        hasFrameTime = false
+        previousPose = null
+        currentPose = null
+        segmentStartRealtime = 0L
+        segmentDurationMillis = DEFAULT_SEGMENT_DURATION_MS
+        lastHeadingOutputDeg = null
     }
 
     fun onPose(pose: GpsPose) {
-        lastPose = pose
-        if (!hasSmoothedPosition) {
-            smoothedLat = pose.latitude
-            smoothedLon = pose.longitude
-            hasSmoothedPosition = true
+        val nowRealtime = SystemClock.elapsedRealtime()
+        if (currentPose == null) {
+            currentPose = pose
+            previousPose = pose
+            segmentStartRealtime = nowRealtime
+            segmentDurationMillis = DEFAULT_SEGMENT_DURATION_MS
+            return
         }
-        if (!hasSmoothedHeading && pose.headingDeg.isFinite()) {
-            smoothedHeadingRad = normalizeRadians(Math.toRadians(pose.headingDeg))
-            hasSmoothedHeading = true
-        }
+
+        val last = currentPose!!
+        previousPose = last
+        currentPose = pose
+        segmentStartRealtime = nowRealtime
+        segmentDurationMillis = computeSegmentDuration(last, pose)
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun current(nowMillis: Long): InterpolatedPose? {
-        val pose = lastPose ?: return if (hasSmoothedPosition) {
-            InterpolatedPose(GeoPoint(smoothedLat, smoothedLon), headingDegreesOrNull())
-        } else {
-            null
+        val current = currentPose ?: return null
+        val previous = previousPose ?: current
+
+        val duration = segmentDurationMillis.coerceAtLeast(MIN_SEGMENT_DURATION_MS)
+        val elapsed = (SystemClock.elapsedRealtime() - segmentStartRealtime).coerceAtLeast(0L)
+        val progress = if (duration <= 0L) 1.0 else (elapsed.toDouble() / duration).coerceIn(0.0, 1.0)
+
+        val lat = previous.latitude + (current.latitude - previous.latitude) * progress
+        val lon = previous.longitude + (current.longitude - previous.longitude) * progress
+        val heading = interpolateHeading(previous, current, progress)?.also {
+            lastHeadingOutputDeg = it
         }
-
-        val predicted = predictPose(pose, nowMillis)
-        val nowRealtime = SystemClock.elapsedRealtime()
-        val dtSeconds = if (hasFrameTime) {
-            val delta = (nowRealtime - lastFrameRealtime).coerceAtLeast(0L)
-            min(delta, MAX_FRAME_GAP_MS) / 1000.0
-        } else {
-            0.0
-        }
-        lastFrameRealtime = nowRealtime
-        hasFrameTime = true
-
-        val alpha = if (dtSeconds <= 0.0) 1.0 else 1 - exp(-dtSeconds / smoothingTimeConstantSeconds)
-
-        if (!hasSmoothedPosition) {
-            smoothedLat = predicted.latitude
-            smoothedLon = predicted.longitude
-            hasSmoothedPosition = true
-        } else {
-            smoothedLat += alpha * (predicted.latitude - smoothedLat)
-            smoothedLon += alpha * (predicted.longitude - smoothedLon)
-        }
-
-        if (pose.headingDeg.isFinite()) {
-            val targetRad = normalizeRadians(Math.toRadians(pose.headingDeg))
-            if (!hasSmoothedHeading) {
-                smoothedHeadingRad = targetRad
-                hasSmoothedHeading = true
-            } else {
-                val delta = wrapAngle(targetRad - smoothedHeadingRad)
-                smoothedHeadingRad = normalizeRadians(smoothedHeadingRad + alpha * delta)
-            }
-        }
-
         return InterpolatedPose(
-            GeoPoint(smoothedLat, smoothedLon),
-            headingDegreesOrNull()
+            GeoPoint(lat, lon),
+            heading,
         )
     }
 
-    private fun headingDegreesOrNull(): Double? = if (hasSmoothedHeading) {
-        val deg = Math.toDegrees(smoothedHeadingRad)
-        if (deg.isFinite()) normalizeHeadingDeg(deg) else null
-    } else {
-        null
+    private fun computeSegmentDuration(previous: GpsPose, current: GpsPose): Long {
+        val maxDuration = (maxSegmentDurationSeconds * 1000).toLong().coerceAtLeast(MIN_SEGMENT_DURATION_MS)
+        val fallbackDuration = (fallbackSegmentDurationSeconds * 1000).toLong().coerceAtLeast(MIN_SEGMENT_DURATION_MS)
+        val rawDuration = (current.timestampMillis - previous.timestampMillis).coerceAtLeast(0L)
+        val duration = if (rawDuration > 0L) rawDuration.coerceAtMost(maxDuration) else fallbackDuration
+        return duration.coerceAtLeast(MIN_SEGMENT_DURATION_MS)
     }
 
-    private fun predictPose(pose: GpsPose, nowMillis: Long): GeoPoint {
-        val deltaMillis = (nowMillis - pose.timestampMillis).coerceAtLeast(0L)
-        val clamped = min(deltaMillis, (maxExtrapolationSeconds * 1000).toLong())
-        if (clamped == 0L || pose.speedMps <= MIN_SPEED_THRESHOLD) {
-            return GeoPoint(pose.latitude, pose.longitude)
+    private fun interpolateHeading(previous: GpsPose, current: GpsPose, progress: Double): Double? {
+        val previousHeading = previous.headingDeg.takeIf { it.isFinite() }
+        val currentHeading = current.headingDeg.takeIf { it.isFinite() }
+
+        return when {
+            previousHeading == null && currentHeading == null -> null
+            previousHeading == null -> normalizeHeadingForOutput(currentHeading!!)
+            currentHeading == null -> normalizeHeadingForOutput(previousHeading)
+            progress <= 0.0 -> normalizeHeadingForOutput(previousHeading)
+            progress >= 1.0 -> normalizeHeadingForOutput(currentHeading)
+            else -> {
+                val reference = lastHeadingOutputDeg
+                val base = reference?.let { wrapAngleNear(previousHeading, it) }
+                    ?: wrapToSigned180(previousHeading)
+                val target = wrapAngleNear(currentHeading, base)
+                val interpolated = base + (target - base) * progress
+                wrapToSigned180(interpolated)
+            }
         }
-        val distance = pose.speedMps * (clamped / 1000.0)
-        return advance(pose.latitude, pose.longitude, pose.headingDeg, distance)
     }
 
-    private fun advance(latDeg: Double, lonDeg: Double, headingDeg: Double, distanceMeters: Double): GeoPoint {
-        val headingRad = normalizeRadians(Math.toRadians(headingDeg))
-        val northComponent = distanceMeters * cos(headingRad)
-        val eastComponent = distanceMeters * sin(headingRad)
-
-        val latRad = Math.toRadians(latDeg)
-        val dLat = northComponent / EARTH_RADIUS_M
-        val dLon = if (abs(cos(latRad)) < 1e-6) 0.0 else eastComponent / (EARTH_RADIUS_M * cos(latRad))
-
-        val newLat = latDeg + Math.toDegrees(dLat)
-        val newLon = lonDeg + Math.toDegrees(dLon)
-        return GeoPoint(newLat, newLon)
+    private fun normalizeHeadingForOutput(value: Double): Double {
+        val reference = lastHeadingOutputDeg
+        return if (reference != null) wrapAngleNear(value, reference) else wrapToSigned180(value)
     }
 
-    private fun normalizeHeadingDeg(value: Double): Double {
+    private fun wrapAngleNear(value: Double, reference: Double): Double {
+        var candidate = value
+        var diff = candidate - reference
+        while (diff > 180.0) {
+            candidate -= 360.0
+            diff = candidate - reference
+        }
+        while (diff < -180.0) {
+            candidate += 360.0
+            diff = candidate - reference
+        }
+        return candidate
+    }
+
+    private fun wrapToSigned180(value: Double): Double {
         var deg = value % 360.0
-        if (deg < 0.0) deg += 360.0
+        if (deg <= -180.0) deg += 360.0
+        if (deg > 180.0) deg -= 360.0
         return deg
-    }
-
-    private fun wrapAngle(angleRad: Double): Double {
-        var a = angleRad
-        while (a <= -PI) a += TWO_PI
-        while (a > PI) a -= TWO_PI
-        return a
-    }
-
-    private fun normalizeRadians(angleRad: Double): Double {
-        var a = angleRad % TWO_PI
-        if (a < 0.0) a += TWO_PI
-        return a
     }
 
     data class InterpolatedPose(
@@ -153,9 +128,7 @@ class GatewayPoseInterpolator(
     )
 
     companion object {
-        private const val EARTH_RADIUS_M = 6_371_000.0
-        private const val MIN_SPEED_THRESHOLD = 0.01
-        private const val MAX_FRAME_GAP_MS = 500L
-        private const val TWO_PI = (2.0 * Math.PI)
+        private const val MIN_SEGMENT_DURATION_MS = 16L
+        private const val DEFAULT_SEGMENT_DURATION_MS = 200L
     }
 }
