@@ -100,6 +100,8 @@ import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayPoseInterpolator
 import com.example.monitoragricola.hardware.gateway.toGatewayConfiguration
+import com.example.monitoragricola.map.ImplementOverlayRenderer
+import com.example.monitoragricola.map.ImplementoBase
 import com.example.monitoragricola.map.ImplementoBase.ExternalTelemetry
 import org.osmdroid.tileprovider.tilesource.ITileSource
 import org.osmdroid.tileprovider.tilesource.XYTileSource
@@ -275,8 +277,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingB: GeoPoint? = null
     private var activeRouteId: Long? = null
     private val routePolylines = mutableListOf<org.osmdroid.views.overlay.Polyline>()
-    private var implementBar: org.osmdroid.views.overlay.Polyline? = null
-    private var implementLink: org.osmdroid.views.overlay.Polyline? = null
+    private var implementOverlayRenderer: ImplementOverlayRenderer? = null
     private var refStartSeq: Int? = null
     private var refEndSeq: Int? = null
     private var routeVisible: Boolean = false
@@ -470,6 +471,7 @@ class MainActivity : AppCompatActivity() {
                 } ?: run {
                     activeImplemento?.stop()
                     activeImplemento = null
+                    implementOverlayRenderer?.clear()
                     lastAppliedImplementoSnapshot = null
                     tvImplemento.text = "Nenhum implemento selecionado"
                 }
@@ -563,6 +565,7 @@ class MainActivity : AppCompatActivity() {
             tvImplemento.text = "Nenhum implemento selecionado"
             activeImplemento?.stop()
             activeImplemento = null
+            implementOverlayRenderer?.clear()
             lastAppliedImplementoSnapshot = null
             applyImplementToPositionSources(null)
         } else {
@@ -745,6 +748,8 @@ class MainActivity : AppCompatActivity() {
             setInfoWindow(null)
         }
         map.overlays.add(tractor)
+
+        implementOverlayRenderer = ImplementOverlayRenderer(map)
 
         // Marca quando o mapa tiver dimensões reais
         map.addOnFirstLayoutListener { _, _, _, _, _ ->
@@ -1382,7 +1387,8 @@ class MainActivity : AppCompatActivity() {
                             if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
                         }
                     }
-                    updateImplementBarOverlay(lastPoint, currentPos)
+                    val headingForOverlay = headingFromPose ?: poseSnapshot?.headingDeg?.toFloat()
+                    updateImplementBarOverlay(lastPoint, currentPos, headingForOverlay)
 
                     lastPoint = currentPos
                 }
@@ -1521,6 +1527,7 @@ class MainActivity : AppCompatActivity() {
         if (prevJobId != null && prevState != null) app.implementoStateStore.save(prevJobId, prevState)
 
         activeImplemento?.stop()
+        implementOverlayRenderer?.clear()
         activeImplemento = impl
         applyImplementToPositionSources(lastAppliedImplementoSnapshot)
 
@@ -1554,6 +1561,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             activeImplemento?.stop()
             activeImplemento = null
+            implementOverlayRenderer?.clear()
             lastAppliedImplementoSnapshot = null
             tvImplemento.text = "Nenhum implemento selecionado"
             map.invalidate()
@@ -1612,6 +1620,7 @@ class MainActivity : AppCompatActivity() {
                 } else if (lastAppliedImplementoSnapshot != null) {
                     activeImplemento?.stop()
                     activeImplemento = null
+                    implementOverlayRenderer?.clear()
                     lastAppliedImplementoSnapshot = null
                     tvImplemento.text = "Nenhum implemento selecionado"
                     if (::map.isInitialized) {
@@ -1936,49 +1945,19 @@ class MainActivity : AppCompatActivity() {
         return bearing
     }
 
-    private fun updateImplementBarOverlay(lastGps: GeoPoint?, currentGps: GeoPoint) {
-        val implBase = activeImplemento as? ImplementoBase ?: return
-
-        Log.d("currentpos", currentGps.toString())
-
-        val bar = implBase.getImplementBarEndpoints() ?: return
-        val (gp1, gp2) = bar
-
-        val color = Color.argb(255, 128, 128, 128)
-        if (implementBar == null) {
-            implementBar = org.osmdroid.views.overlay.Polyline(map).apply {
-                outlinePaint.strokeWidth = 6f
-                outlinePaint.color = color
-                isGeodesic = false
-                setPoints(listOf(gp1, gp2))
-            }
-            map.overlays.add(implementBar)
-        } else {
-            implementBar?.setPoints(listOf(gp1, gp2))
+    private fun updateImplementBarOverlay(lastGps: GeoPoint?, currentGps: GeoPoint, headingDeg: Float?) {
+        val renderer = implementOverlayRenderer ?: return
+        val implBase = activeImplemento as? ImplementoBase ?: run {
+            renderer.clear()
+            return
         }
 
-        val implCenter = implBase.getImplementCenter()
-        if (implCenter != null) {
-            val pts = mutableListOf<GeoPoint>()
-            val tractorPos = interpolatedPosition ?: tractor.position
-            pts += tractorPos
-            val joint = if (implBase.getPaintModel() == PaintModel.ARTICULADO) implBase.getArticulationPoint() else null
-            if (joint != null) pts += joint
-            pts += implCenter
-
-            val linkColor = Color.argb(180, 80, 80, 80)
-            if (implementLink == null) {
-                implementLink = org.osmdroid.views.overlay.Polyline(map).apply {
-                    outlinePaint.strokeWidth = 4f
-                    outlinePaint.color = linkColor
-                    isGeodesic = false
-                    setPoints(pts)
-                }
-                map.overlays.add(implementLink)
-            } else {
-                implementLink?.setPoints(pts)
-            }
+        if (lastGps != null) {
+            implBase.updateBarPreview(lastGps, currentGps, headingDeg)
         }
+
+        val tractorPos = interpolatedPosition ?: tractor.position
+        renderer.update(implBase, tractorPos)
     }
 
     private fun clearResumeExtras() { intent.removeExtra("resume_job_id") }
@@ -2890,14 +2869,8 @@ class MainActivity : AppCompatActivity() {
         clearPositionProvider()
 
         if (::map.isInitialized) {
-            implementBar?.let {
-                map.overlays.remove(it)
-                implementBar = null
-            }
-            implementLink?.let {
-                map.overlays.remove(it)
-                implementLink = null
-            }
+            implementOverlayRenderer?.clear()
+            implementOverlayRenderer = null
             if (routePolylines.isNotEmpty()) {
                 routePolylines.forEach { map.overlays.remove(it) }
                 routePolylines.clear()
