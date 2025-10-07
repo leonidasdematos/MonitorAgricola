@@ -25,6 +25,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import androidx.core.view.updatePadding
 import androidx.lifecycle.lifecycleScope
+import com.example.monitoragricola.BuildConfig
 import com.example.monitoragricola.R
 import com.example.monitoragricola.implementos.ImplementoSelector
 import com.example.monitoragricola.implementos.ImplementosPrefs
@@ -100,6 +101,7 @@ import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayPoseInterpolator
 import com.example.monitoragricola.hardware.gateway.toGatewayConfiguration
+import com.example.monitoragricola.map.ImplementOverlayDebugTracer
 import com.example.monitoragricola.map.ImplementOverlayRenderer
 import com.example.monitoragricola.map.ImplementoBase
 import com.example.monitoragricola.map.ImplementoBase.ExternalTelemetry
@@ -278,6 +280,7 @@ class MainActivity : AppCompatActivity() {
     private var activeRouteId: Long? = null
     private val routePolylines = mutableListOf<org.osmdroid.views.overlay.Polyline>()
     private var implementOverlayRenderer: ImplementOverlayRenderer? = null
+    private val implementOverlayDebugTracer = ImplementOverlayDebugTracer(BuildConfig.DEBUG)
     private var refStartSeq: Int? = null
     private var refEndSeq: Int? = null
     private var routeVisible: Boolean = false
@@ -749,8 +752,9 @@ class MainActivity : AppCompatActivity() {
         }
         map.overlays.add(tractor)
 
-        implementOverlayRenderer = ImplementOverlayRenderer(map)
-
+        implementOverlayRenderer = ImplementOverlayRenderer(map).also {
+            it.debugTracer = implementOverlayDebugTracer
+        }
         // Marca quando o mapa tiver dimensões reais
         map.addOnFirstLayoutListener { _, _, _, _, _ ->
             mapReady = true
@@ -1955,6 +1959,7 @@ class MainActivity : AppCompatActivity() {
         if (lastGps != null) {
             implBase.updateBarPreview(lastGps, currentGps, headingDeg)
         }
+        implementOverlayDebugTracer.onPreviewInput(implBase, lastGps, currentGps, headingDeg)
 
         val tractorPos = interpolatedPosition ?: tractor.position
         renderer.update(implBase, tractorPos)

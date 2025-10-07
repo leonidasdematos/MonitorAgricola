@@ -10,6 +10,7 @@ class ImplementOverlayRenderer(
 ) {
     private var implementBar: Polyline? = null
     private var implementLink: Polyline? = null
+    var debugTracer: ImplementOverlayDebugTracer? = null
 
     /** Desenha a barra do implemento (gp1..gp2) e o link trator->(articulação?)->centro do implemento. */
     fun update(impl: Implemento?, tractorPos: GeoPoint) {
@@ -39,12 +40,13 @@ class ImplementOverlayRenderer(
 
         // 2) Link (trator -> [articulação] -> centro do implemento)
         val center = implBase.getImplementCenter()
+        val articulation = implBase.getArticulationPoint()
         if (center == null) {
             removeLink()
         } else {
             val pts = mutableListOf<GeoPoint>()
             pts += tractorPos
-            implBase.getArticulationPoint()?.let { pts += it }
+            articulation?.let { pts += it }
             pts += center
 
             if (implementLink == null) {
@@ -59,6 +61,13 @@ class ImplementOverlayRenderer(
                 implementLink?.setPoints(pts)
             }
         }
+        debugTracer?.onRendererUpdate(
+            bar,
+            center,
+            articulation,
+            tractorPos
+        )
+
 
         map.invalidate()
     }
@@ -66,6 +75,7 @@ class ImplementOverlayRenderer(
     fun clear() {
         removeBar()
         removeLink()
+        debugTracer?.onOverlayCleared()
         map.invalidate()
     }
 
