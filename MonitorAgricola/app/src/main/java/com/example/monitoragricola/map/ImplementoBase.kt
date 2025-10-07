@@ -153,7 +153,7 @@ abstract class ImplementoBase(
         val dist = hypot(vx, vy)
 
         // Atualize o heading SEMPRE que houver qualquer variação mensurável
-        val headingRadFromPose = headingDeg?.toDouble()?.let { Math.toRadians(it.toDouble()) }
+        val headingRadFromPose = headingDeg?.takeIf { it.isFinite() }?.toDouble()?.let { Math.toRadians(it) }
         headingRadFromPose?.let { lastHeadingRad = it }
 
         val headingStep = minHeadingStep(speedMps, headingRadFromPose != null)

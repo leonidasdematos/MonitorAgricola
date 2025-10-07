@@ -1289,8 +1289,8 @@ class MainActivity : AppCompatActivity() {
                     val currentPos = interpolatedPosition!!
                     tractor.position = currentPos
 
-                    val headingFromPose = smoothingResult?.headingDeg?.toFloat()
-                        ?: poseSnapshot?.headingDeg?.toFloat()
+                    val headingFromPose = smoothingResult?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
+                        ?: poseSnapshot?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
                     val mapHeadingFromPose = headingFromPose?.let { implementHeadingToBearing(it) }
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
@@ -1394,7 +1394,7 @@ class MainActivity : AppCompatActivity() {
                             if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
                         }
                     }
-                    val headingForOverlay = headingFromPose ?: poseSnapshot?.headingDeg?.toFloat()
+                    val headingForOverlay = headingFromPose
                     updateImplementBarOverlay(lastPoint, currentPos, headingForOverlay)
 
                     lastPoint = currentPos

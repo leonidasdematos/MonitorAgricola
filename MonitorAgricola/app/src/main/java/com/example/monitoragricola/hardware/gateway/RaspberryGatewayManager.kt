@@ -37,7 +37,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.osmdroid.util.GeoPoint
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.sin
 
 
 sealed class GatewayConnectionState {
@@ -81,6 +85,7 @@ class RaspberryGatewayManager(
     private var lastProgramVersion: String? = null
     private var lastImplementConfig: GatewayImplementConfiguration? = null
     private var activeImplementId: Int? = null
+    private var lastCourseFixForHeading: CourseFix? = null
 
 
     fun ensureConnected(config: GatewayConnectionConfig = GatewayConnectionConfig.default()) {
@@ -297,6 +302,7 @@ class RaspberryGatewayManager(
         reader: BufferedReader,
         writer: BufferedWriter,
     ) {
+        lastCourseFixForHeading = null
         while (true) {
             val line = reader.safeReadLine() ?: break
             val envelope = parseEnvelope(line) ?: continue
@@ -326,9 +332,11 @@ class RaspberryGatewayManager(
                 }
                 val timestamp = obj.get("timestamp_ms")?.asLongOrNull()
                     ?: System.currentTimeMillis()
-                val heading = obj.get("heading_deg")?.asDoubleOrNull()
-                    ?: obj.get("heading")?.asDoubleOrNull()
-                    ?: 0.0
+                val fallbackHeading = updateCourseHeading(latitude, longitude, timestamp)
+                val heading = obj.get("heading_deg")?.asDoubleOrNull()?.takeIf { it.isFinite() }
+                    ?: obj.get("heading")?.asDoubleOrNull()?.takeIf { it.isFinite() }
+                    ?: fallbackHeading
+                    ?: Double.NaN
                 val speed = obj.get("speed_mps")?.asDoubleOrNull()
                     ?: obj.get("speed")?.asDoubleOrNull()
                     ?: 0.0
@@ -408,6 +416,37 @@ class RaspberryGatewayManager(
             }
         }
         return mask
+    }
+
+    private fun updateCourseHeading(latitude: Double, longitude: Double, timestamp: Long): Double? {
+        val previous = lastCourseFixForHeading
+        lastCourseFixForHeading = CourseFix(latitude, longitude, timestamp)
+        if (previous == null) return null
+        if (timestamp <= previous.timestampMillis) {
+            return null
+        }
+
+        val distance = GeoPoint(previous.latitude, previous.longitude)
+            .distanceToAsDouble(GeoPoint(latitude, longitude))
+        if (distance < MIN_HEADING_DISTANCE_METERS) {
+            return null
+        }
+
+        val bearing = bearingBetween(previous.latitude, previous.longitude, latitude, longitude)
+        return bearing
+    }
+
+    private fun bearingBetween(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val phi1 = Math.toRadians(lat1)
+        val phi2 = Math.toRadians(lat2)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val y = sin(dLon) * cos(phi2)
+        val x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLon)
+        var bearing = Math.toDegrees(atan2(y, x))
+        if (bearing < 0.0) {
+            bearing += 360.0
+        }
+        return bearing
     }
 
     private fun JsonElement.asLongOrNull(): Long? = when {
@@ -628,6 +667,12 @@ class RaspberryGatewayManager(
         @SerializedName("width_m") val widthMeters: Double?,
     )
 
+    private data class CourseFix(
+        val latitude: Double,
+        val longitude: Double,
+        val timestampMillis: Long,
+    )
+
 
     companion object {
         private const val TAG = "GatewayManager"
@@ -641,5 +686,7 @@ class RaspberryGatewayManager(
             supportsIsoBus = true,
             supportsSectionControl = true,
         )
+
+        private const val MIN_HEADING_DISTANCE_METERS = 0.05
     }
 }
