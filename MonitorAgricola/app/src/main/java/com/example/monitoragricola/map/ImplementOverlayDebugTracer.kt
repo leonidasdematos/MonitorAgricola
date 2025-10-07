@@ -2,6 +2,7 @@ package com.example.monitoragricola.map
 
 import android.os.SystemClock
 import android.util.Log
+import java.util.Locale
 import org.osmdroid.util.GeoPoint
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -19,7 +20,8 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
         val headingDeg: Float?,
         val status: Map<String, Any>,
         val timestamp: Long,
-    )
+        val debugInfo: ImplementoBase.PreviewDebugInfo?,
+        )
 
     private data class BarState(
         val p1: GeoPoint,
@@ -35,7 +37,13 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
     private var lastPreview: PreviewSnapshot? = null
     private var lastBar: BarState? = null
 
-    fun onPreviewInput(impl: ImplementoBase, lastGps: GeoPoint?, currentGps: GeoPoint, headingDeg: Float?) {
+    fun onPreviewInput(
+        impl: ImplementoBase,
+        lastGps: GeoPoint?,
+        currentGps: GeoPoint,
+        headingDeg: Float?,
+        debugInfo: ImplementoBase.PreviewDebugInfo?,
+    ) {
         if (!enabled) return
         val delta = lastGps?.distanceToAsDouble(currentGps)
         val statusCopy = impl.getStatus().mapValues { it.value }
@@ -45,7 +53,8 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
             headingDeg = headingDeg,
             status = statusCopy,
             timestamp = SystemClock.elapsedRealtime(),
-        )
+            debugInfo = debugInfo,
+            )
     }
 
     fun onRendererUpdate(
@@ -97,10 +106,14 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
             val centerShift = center?.let { c -> prev.center?.let { c.distanceToAsDouble(it) } }
 
             if (abs(bearingDiff) > HEADING_JUMP_THRESHOLD_DEG && tractorShift < TRACTOR_MOVEMENT_THRESHOLD_M) {
+                val directSwap = swapAnalysis(state, prev)
+                val swapSuspect = directSwap.swapped + SWAP_DISTANCE_EPS < directSwap.direct
                 Log.w(
                     TAG,
                     "Large bar heading jump ${bearingDiff.format2()}° with tractor shift=${tractorShift.format2()}m " +
-                            "and center shift=${centerShift?.format2()}m. ${describePreview()}"
+                            "and center shift=${centerShift?.format2()}m, swapSuspect=$swapSuspect " +
+                            "(direct=${directSwap.direct.format2()}m vs swapped=${directSwap.swapped.format2()}m). " +
+                            describePreview()
                 )
             }
 
@@ -142,13 +155,33 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
         ) { (key, value) -> "$key=${formatAny(value)}" }
         val deltaText = preview.deltaMeters?.format2()?.let { "${it}m" } ?: "∅"
         val headingText = preview.headingDeg?.toDouble()?.format2() ?: "∅"
-        return "previewAge=${age}ms, hadLast=${preview.hadLastFix}, Δ=${deltaText}, heading=${headingText}, ${statusSummary}"
-    }
+        val debugText = preview.debugInfo?.let { info ->
+            val forward = info.forwardVector.formatVec()
+            val right = info.rightVector.formatVec()
+            val theta = info.implThetaRad?.let { String.format("%.2f°", Math.toDegrees(it)) } ?: "∅"
+            "debug={disp=${info.displacementMeters.format3()}m, fwd=${info.forwardSource.name.lowercase(Locale.ROOT)}$forward, " +
+                    "right=${info.rightSource.name.lowercase(Locale.ROOT)}$right, articulated=${info.usedArticulatedCenters}, " +
+                    "axisActive=${info.articulationAxisActive}, paint=${info.paintModel.name.lowercase(Locale.ROOT)}, " +
+                    "headingIn=${info.headingDegInput?.toDouble()?.format2() ?: "∅"}, lastHeadingRad=${info.lastHeadingRad?.format2() ?: "∅"}, " +
+                    "implTheta=${theta}}"
+        } ?: "debug=∅"
+        return "previewAge=${age}ms, hadLast=${preview.hadLastFix}, Δ=${deltaText}, heading=${headingText}, ${statusSummary}, ${debugText}"    }
 
     private fun formatAny(value: Any): String = when (value) {
         is Number -> value.toDouble().format2()
         else -> value.toString()
     }
+
+    private fun Pair<Double, Double>.formatVec(): String = "(${first.format2()}, ${second.format2()})"
+
+    private fun swapAnalysis(current: BarState, previous: BarState): SwapAnalysis {
+        val direct = current.p1.distanceToAsDouble(previous.p1) + current.p2.distanceToAsDouble(previous.p2)
+        val swapped = current.p1.distanceToAsDouble(previous.p2) + current.p2.distanceToAsDouble(previous.p1)
+        return SwapAnalysis(direct, swapped)
+    }
+
+    private data class SwapAnalysis(val direct: Double, val swapped: Double)
+
 
     private fun bearingBetween(start: GeoPoint, end: GeoPoint): Double {
         val lat1 = Math.toRadians(start.latitude)
@@ -180,5 +213,7 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
         private const val TRACTOR_MOVEMENT_THRESHOLD_M = 0.25
         private const val LENGTH_JUMP_THRESHOLD_M = 0.5
         private const val PREVIEW_STALE_THRESHOLD_MS = 200L
+        private const val SWAP_DISTANCE_EPS = 0.2
+
     }
 }

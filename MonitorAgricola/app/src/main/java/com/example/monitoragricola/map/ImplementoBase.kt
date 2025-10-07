@@ -58,6 +58,28 @@ abstract class ImplementoBase(
         pendingArticulationLocal = local
     }
 
+    data class PreviewDebugInfo(
+        val displacementMeters: Double,
+        val forwardVector: Pair<Double, Double>,
+        val forwardSource: ForwardSource,
+        val rightVector: Pair<Double, Double>,
+        val rightSource: RightSource,
+        val usedArticulatedCenters: Boolean,
+        val articulationAxisActive: Boolean,
+        val paintModel: PaintModel,
+        val headingDegInput: Float?,
+        val lastHeadingRad: Double?,
+        val implThetaRad: Double?,
+    ) {
+        enum class ForwardSource { DISPLACEMENT, POSE_HEADING, CACHED_HEADING, DEFAULT_NORTH }
+        enum class RightSource { FORWARD_PERP, DISPLACEMENT_PERP, ARTICULATION_AXIS, FALLBACK_PERP }
+    }
+
+    @Volatile private var lastPreviewDebug: PreviewDebugInfo? = null
+
+    fun consumePreviewDebugInfo(): PreviewDebugInfo? = lastPreviewDebug.also { lastPreviewDebug = null }
+
+
     protected abstract fun getWorkWidthMeters(): Float
 
     open fun updateOffsets(

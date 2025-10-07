@@ -3,6 +3,7 @@ package com.example.monitoragricola.ui
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
@@ -25,7 +26,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import androidx.core.view.updatePadding
 import androidx.lifecycle.lifecycleScope
-import com.example.monitoragricola.BuildConfig
 import com.example.monitoragricola.R
 import com.example.monitoragricola.implementos.ImplementoSelector
 import com.example.monitoragricola.implementos.ImplementosPrefs
@@ -280,7 +280,10 @@ class MainActivity : AppCompatActivity() {
     private var activeRouteId: Long? = null
     private val routePolylines = mutableListOf<org.osmdroid.views.overlay.Polyline>()
     private var implementOverlayRenderer: ImplementOverlayRenderer? = null
-    private val implementOverlayDebugTracer = ImplementOverlayDebugTracer(BuildConfig.DEBUG)
+    private val implementOverlayDebugTracer by lazy {
+        val isDebuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        ImplementOverlayDebugTracer(isDebuggable)
+    }
     private var refStartSeq: Int? = null
     private var refEndSeq: Int? = null
     private var routeVisible: Boolean = false
@@ -1956,10 +1959,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (lastGps != null) {
+        val previewDebug = if (lastGps != null) {
             implBase.updateBarPreview(lastGps, currentGps, headingDeg)
+            implBase.consumePreviewDebugInfo()
+        } else {
+            null
         }
-        implementOverlayDebugTracer.onPreviewInput(implBase, lastGps, currentGps, headingDeg)
+        implementOverlayDebugTracer.onPreviewInput(implBase, lastGps, currentGps, headingDeg, previewDebug)
 
         val tractorPos = interpolatedPosition ?: tractor.position
         renderer.update(implBase, tractorPos)
