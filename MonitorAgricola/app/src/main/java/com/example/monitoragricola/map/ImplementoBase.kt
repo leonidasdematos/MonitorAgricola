@@ -159,7 +159,7 @@ abstract class ImplementoBase(
         val headingStep = minHeadingStep(speedMps, headingRadFromPose != null)
         val useDisplacementForHeading = dist >= headingStep
         if (useDisplacementForHeading) {
-            lastHeadingRad = atan2(vy, vx) // x=leste, y=norte (0° = norte)
+            lastHeadingRad = atan2(vx, vy)
         }
 
         val vectorThreshold = max(EPS_STEP, headingStep)
