@@ -1263,8 +1263,9 @@ class MainActivity : AppCompatActivity() {
                     else -> 0L
                 }
                 positionProvider?.getCurrentPosition()?.let { pos ->
-                    val poseSnapshot = latestPose
-                    val smoothingResult = if (positionProvider === externalGatewayProvider) {
+                    val usingSimulator = positionProvider === simulatorProvider
+                    val poseSnapshot = if (usingSimulator) null else latestPose
+                    val smoothingResult = if (!usingSimulator && positionProvider === externalGatewayProvider) {
                         gatewayPoseInterpolator?.current(now)
                     } else {
                         null
@@ -1278,7 +1279,7 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
                     }
 
-                    val nextPosition = if (positionProvider === simulatorProvider) {
+                    val nextPosition = if (usingSimulator) {
                         pos
                     } else {
                         smoothingResult?.position ?: interpolatedPosition?.let {
@@ -1290,11 +1291,15 @@ class MainActivity : AppCompatActivity() {
 
                     interpolatedPosition = nextPosition
 
-                    val currentPos = interpolatedPosition!!
+                    val currentPos = nextPosition
                     tractor.position = currentPos
 
-                    val headingFromPose = smoothingResult?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
-                        ?: poseSnapshot?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
+                    val headingFromPose = if (usingSimulator) {
+                        null
+                    } else {
+                        smoothingResult?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
+                            ?: poseSnapshot?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
+                    }
                     val mapHeadingFromPose = headingFromPose?.let { implementHeadingToBearing(it) }
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
