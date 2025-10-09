@@ -1966,6 +1966,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateImplementBarOverlay(lastGps: GeoPoint?, currentGps: GeoPoint, headingDeg: Float?) {
+        Log.d("LastGPS:", lastGps.toString())
+        Log.d("currentGps:", currentGps.toString())
+        Log.d("Heading:", headingDeg.toString())
+
         val renderer = implementOverlayRenderer ?: return
         val implBase = activeImplemento as? ImplementoBase ?: run {
             renderer.clear()
@@ -1983,6 +1987,7 @@ class MainActivity : AppCompatActivity() {
         val tractorPos = interpolatedPosition ?: tractor.position
         renderer.update(implBase, tractorPos)
     }
+
 
     private fun clearResumeExtras() { intent.removeExtra("resume_job_id") }
 
