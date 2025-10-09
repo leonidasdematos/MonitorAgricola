@@ -20,9 +20,9 @@ class JobsViewModel(
         initialValue = emptyList<JobEntity>()
     )
 
-    fun createAndStart(name: String, snapshot: ImplementoSnapshot, source: String, onCreated: (Long)->Unit) {
+    fun createAndStart(name: String, snapshot: ImplementoSnapshot, onCreated: (Long)->Unit) {
         viewModelScope.launch {
-            val id = manager.createAndStart(name, snapshot, source)
+            val id = manager.createAndStart(name, snapshot)
             onCreated(id)
         }
     }

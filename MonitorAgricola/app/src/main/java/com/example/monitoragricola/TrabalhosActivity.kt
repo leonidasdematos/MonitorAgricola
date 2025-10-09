@@ -225,8 +225,7 @@ class TrabalhosActivity : AppCompatActivity() {
                                 return@launch
                             }
 
-                            val source = obterFonteAtual()
-                            val id = manager.createAndStart(nome, snapshot, source)
+                            val id = manager.createAndStart(nome, snapshot)
                             persistSelectedJobId(id)
 
 
@@ -247,13 +246,6 @@ class TrabalhosActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancelar", null)
             .show()
-    }
-
-
-    // Helpers: usamos as mesmas prefs da Main para snapshot de implemento e fonte
-    private fun obterFonteAtual(): String {
-        val prefs = getSharedPreferences("configs", MODE_PRIVATE)
-        return prefs.getString("fonteCoordenada", "gps") ?: "gps"
     }
 
     // =============== Renderização do card e filtragem da lista ===============

@@ -6,6 +6,7 @@
     <string name="gateway_medium_bluetooth">Bluetooth</string>
     <string name="gateway_medium_cable">Cabo / Ethernet</string>
     <string name="settings_gateway_section_title">Gateway externo</string>
+    <string name="settings_gateway_coordinates_info">As coordenadas são recebidas exclusivamente do gateway externo.</string>
     <string name="settings_gateway_connect_button">Conectar dispositivo</string>
     <string name="settings_gateway_change_device">Trocar dispositivo</string>
     <string name="settings_gateway_selected_device">Dispositivo selecionado: %1$s</string>

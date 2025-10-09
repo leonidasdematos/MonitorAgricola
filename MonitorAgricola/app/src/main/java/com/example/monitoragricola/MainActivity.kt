@@ -19,7 +19,6 @@ import androidx.annotation.StringRes
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.constraintlayout.widget.ConstraintLayout
-import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -33,7 +32,6 @@ import com.example.monitoragricola.implementos.ImplementoSnapshot
 import com.example.monitoragricola.jobs.JobEventType
 import com.example.monitoragricola.jobs.routes.RouteDisplayPrefs
 import com.example.monitoragricola.jobs.routes.RouteType
-import com.example.monitoragricola.gps.FilteredDevicePositionProvider
 import com.example.monitoragricola.gps.GpsFilterPreferences
 import com.example.monitoragricola.gps.GpsFilterSettings
 import com.example.monitoragricola.gps.api.GpsPose
@@ -70,8 +68,6 @@ import org.osmdroid.events.MapListener
 import org.osmdroid.events.ScrollEvent
 import org.osmdroid.events.ZoomEvent
 import kotlin.math.*
-import android.Manifest
-import android.content.pm.PackageManager.PERMISSION_GRANTED
 import android.graphics.Color
 import android.util.Log
 import android.view.View
@@ -247,10 +243,7 @@ class MainActivity : AppCompatActivity() {
     private var activeImplemento: Implemento? = null
     private var lastAppliedImplementoSnapshot: ImplementoSnapshot? = null
     private var positionProvider: PositionProvider? = null
-    private var filteredDeviceProvider: FilteredDevicePositionProvider? = null
     private var externalGatewayProvider: ExternalGatewayPositionProvider? = null
-    private var simulatorProvider: TractorSimulatorProvider? = null
-    private var lastPositionSource: String? = null
     private var gpsPoseJob: Job? = null
     private var gatewayTelemetryJob: Job? = null
     private var gatewaySyncJob: Job? = null
@@ -311,12 +304,6 @@ class MainActivity : AppCompatActivity() {
             if (result.resultCode == Activity.RESULT_OK) {
                 handleRoutesResult(result.data)
             }
-        }
-
-    private val requestLocationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startGpsProvider()
-            else Toast.makeText(this, "Permissão de localização negada", Toast.LENGTH_SHORT).show()
         }
 
     /* ======================= Ciclo de vida ======================= */
@@ -525,9 +512,6 @@ class MainActivity : AppCompatActivity() {
             coldStart = false
         }
 
-        val fonte = getSharedPreferences("configs", MODE_PRIVATE)
-            .getString("fonteCoordenada", "gps")
-
         val skipRestore = keptRunningInBackground
         navigatingAway = false
         keptRunningInBackground = false
@@ -539,7 +523,7 @@ class MainActivity : AppCompatActivity() {
 
             syncSelectionAfterBackground()
 
-            configurePositionSource(fonte)
+            startExternalGatewayProvider()
 
 
             // UI
@@ -557,9 +541,7 @@ class MainActivity : AppCompatActivity() {
         // ====== Fluxo normal (NÃO estava rodando em bg): pode recriar ======
         lastWorkingFlag = isWorking
 
-        // Reset providers/caches (garante estado limpo)
-        clearPositionProvider()
-        simulatorProvider?.stop(); simulatorProvider = null
+        // Reset caches (garante estado limpo)
         resetCache()
 
         selectedJobId = ImplementosPrefs.getSelectedJobId(this)
@@ -590,7 +572,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Fonte de posição
-        configurePositionSource(fonte, force = true)
+        startExternalGatewayProvider(forceReconnect = true)
 
 
         // Restore do raster quando o mapa estiver pronto
@@ -621,8 +603,7 @@ class MainActivity : AppCompatActivity() {
 
         val shouldKeep = (isWorking || navigatingAway) && !isFinishing
         if (!shouldKeep) {
-            clearPositionProvider()
-            simulatorProvider?.stop()
+            stopGatewayProvider()
             handler.removeCallbacksAndMessages(null)
             persistPlayState()
             stopCheckpointLoop()
@@ -670,8 +651,7 @@ class MainActivity : AppCompatActivity() {
         keptRunningInBackground = keep
 
         if (!keep) {
-            clearPositionProvider()
-            simulatorProvider?.stop()
+            stopGatewayProvider()
             handler.removeCallbacksAndMessages(null)
             stopCheckpointLoop()
             mapLoopStarted = false
@@ -1257,15 +1237,10 @@ class MainActivity : AppCompatActivity() {
             override fun run() {
                 val frameStart = SystemClock.elapsedRealtime()
                 val now = System.currentTimeMillis()
-                val rawFixMillis = when {
-                    filteredDeviceProvider != null -> filteredDeviceProvider?.lastFixMillis() ?: 0L
-                    externalGatewayProvider != null -> externalGatewayProvider?.latestPose()?.timestampMillis ?: 0L
-                    else -> 0L
-                }
+                val rawFixMillis = externalGatewayProvider?.latestPose()?.timestampMillis ?: 0L
                 positionProvider?.getCurrentPosition()?.let { pos ->
-                    val usingSimulator = positionProvider === simulatorProvider
-                    val poseSnapshot = if (usingSimulator) null else latestPose
-                    val smoothingResult = if (!usingSimulator && positionProvider === externalGatewayProvider) {
+                    val poseSnapshot = latestPose
+                    val smoothingResult = if (positionProvider === externalGatewayProvider) {
                         gatewayPoseInterpolator?.current(now)
                     } else {
                         null
@@ -1290,12 +1265,8 @@ class MainActivity : AppCompatActivity() {
                     val currentPos = nextPosition
                     tractor.position = currentPos
 
-                    val headingFromPose = if (usingSimulator) {
-                        null
-                    } else {
-                        smoothingResult?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
-                            ?: poseSnapshot?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
-                    }
+                    val headingFromPose = smoothingResult?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
+                        ?: poseSnapshot?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
                     val mapHeadingFromPose = headingFromPose?.let { implementHeadingToBearing(it) }
                     var headingFromMovement: Float? = null
                     lastPoint?.let { last ->
@@ -1555,8 +1526,6 @@ class MainActivity : AppCompatActivity() {
         val status = runCatching { impl.getStatus() }.getOrNull()
         val nome = (status?.get("nome") as? String) ?: "Implemento"
         tvImplemento.text = if (origin == "forced") "Implemento (Job): $nome" else "Implemento: $nome"
-
-        if (positionProvider === simulatorProvider) simulatorProvider?.setImplemento(impl) // não chama start()
 
         if (isWorking) impl.start() else impl.stop()
         map.invalidate()
@@ -1832,7 +1801,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateGpsAccuracyIndicator(pose: GpsPose?) {
         val text = when {
-            positionProvider === simulatorProvider -> "GPS: ±0.0 m"
             pose?.accuracyM != null && pose.accuracyM.isFinite() && pose.accuracyM >= 0.0 -> {
                 val acc = pose.accuracyM
                 String.format(Locale.US, "GPS: ±%.1f m", acc)
@@ -2257,7 +2225,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (w > 0f) return w.coerceAtLeast(0.05f)
         }
-        (simulatorProvider?.getImplementoAtual() ?: activeImplemento)?.getStatus()?.let { st ->
+        activeImplemento?.getStatus()?.let { st ->
             val w = (st["larguraTrabalhoM"] as? Number)?.toFloat()
                 ?: (st["largura"] as? Number)?.toFloat()
                 ?: run {
@@ -2431,111 +2399,48 @@ class MainActivity : AppCompatActivity() {
 
     /* ======================= Permissão / providers ======================= */
 
-    private fun configurePositionSource(source: String?, force: Boolean = false) {
-        val normalized = when (source?.lowercase(Locale.ROOT)) {
-            "simulador" -> "simulador"
-            "rtk" -> "rtk"
-            else -> "gps"
-        }
-
-        val needsReconfigure = force ||
-                lastPositionSource == null ||
-                positionProvider == null ||
-                normalized != lastPositionSource ||
-                (normalized == "simulador" && positionProvider !== simulatorProvider) ||
-                (normalized != "simulador" && positionProvider === simulatorProvider) ||
-                (normalized == "rtk" && positionProvider !== externalGatewayProvider) ||
-                (normalized != "rtk" && positionProvider === externalGatewayProvider)
-
-        if (!needsReconfigure) {
-            lastPositionSource = normalized
+    private fun startExternalGatewayProvider(forceReconnect: Boolean = false) {
+        if (!forceReconnect && externalGatewayProvider != null) {
+            positionProvider = externalGatewayProvider
+            externalGatewayProvider?.start()
+            applyImplementToPositionSources(lastAppliedImplementoSnapshot)
             return
         }
 
-        simulatorProvider?.stop()
-        if (normalized != "simulador") {
-            simulatorProvider = null
+        if (forceReconnect) {
+            stopGatewayProvider()
         }
 
-        clearPositionProvider()
-
-        when (normalized) {
-            "simulador" -> {
-                simulatorProvider = TractorSimulatorProvider(map, tractor)
-                positionProvider = simulatorProvider
-                gatewayPoseInterpolator = null
-                activeImplemento?.let { simulatorProvider?.setImplemento(it) }
-                positionProvider?.start()
-                updateGpsAccuracyIndicator(latestPose)
-            }
-            "rtk" -> startExternalGatewayProvider()
-            else -> checkLocationPermission()
+        if (externalGatewayProvider != null) {
+            return
         }
 
-        lastPositionSource = normalized
-    }
+        gpsFilterSettings = GpsFilterPreferences.read(this)
 
-
-    private fun checkLocationPermission() {
-        val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PERMISSION_GRANTED
-        if (hasFine) startGpsProvider() else requestLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-    }
-
-    private fun startGpsProvider() {
-        gpsPoseJob?.cancel()
-        gpsPoseJob = null
-        stopDeviceProvider()
-        positionProvider?.stop()
-
-        val settings = GpsFilterPreferences.read(this)
-        gpsFilterSettings = settings
-        val provider = FilteredDevicePositionProvider(this, lifecycleScope, settings)
-        filteredDeviceProvider = provider
-        positionProvider = provider
-        simulatorProvider = null
-        gatewayPoseInterpolator = null
-        latestPose = null
-
-        gpsPoseJob = lifecycleScope.launch {
-            provider.poses.collectLatest { pose ->
-                latestPose = pose
-                lastPositionMillis = pose.timestampMillis
-                speedEmaKmh = pose.speedMps * 3.6
-            }
-        }
-        positionProvider?.start()
-        updateGpsAccuracyIndicator(latestPose)
-        applyImplementToPositionSources(lastAppliedImplementoSnapshot)
-    }
-
-    private fun startExternalGatewayProvider() {
-        gpsPoseJob?.cancel()
-        gpsPoseJob = null
         gatewayTelemetryJob?.cancel()
         gatewayTelemetryJob = null
         gatewaySyncJob?.cancel()
         gatewaySyncJob = null
+        gpsPoseJob?.cancel()
+        gpsPoseJob = null
 
         val provider = ExternalGatewayPositionProvider(gatewayManager, lifecycleScope)
         externalGatewayProvider = provider
         positionProvider = provider
-        simulatorProvider = null
-        filteredDeviceProvider = null
         latestPose = null
         gatewayPoseInterpolator = GatewayPoseInterpolator().also { it.reset() }
         interpolatedPosition = null
 
         val snapshot = lastAppliedImplementoSnapshot
         val storedSelection = GatewayConnectionPreferences.loadSelection(this)
-        val config = if (snapshot != null && snapshot.hardwareManaged) {
-            val medium = GatewayConnectionMedium.fromStorageKey(snapshot.hardwareTransport)
-            val endpoint = snapshot.hardwareEndpoint?.let { endpoint ->
-                if (endpoint.isBlank()) null else endpoint
+        val config = when {
+            snapshot != null && snapshot.hardwareManaged -> {
+                val medium = GatewayConnectionMedium.fromStorageKey(snapshot.hardwareTransport)
+                val endpoint = snapshot.hardwareEndpoint?.takeIf { it.isNotBlank() }
+                GatewayConnectionConfig(medium = medium, endpoint = endpoint)
             }
-            GatewayConnectionPreferences.toConnectionConfig(storedSelection)
+            else -> GatewayConnectionPreferences.toConnectionConfig(storedSelection)
                 ?: GatewayConnectionConfig.default()
-        } else {
-            GatewayConnectionConfig.default()
         }
 
         gatewayManager.ensureConnected(config)
@@ -2573,51 +2478,35 @@ class MainActivity : AppCompatActivity() {
         applyImplementToPositionSources(lastAppliedImplementoSnapshot)
     }
 
-    private fun stopDeviceProvider() {
+    private fun stopGatewayProvider() {
         gpsPoseJob?.cancel()
         gpsPoseJob = null
         gatewayTelemetryJob?.cancel()
         gatewayTelemetryJob = null
         gatewaySyncJob?.cancel()
         gatewaySyncJob = null
-        filteredDeviceProvider?.stop()
-        filteredDeviceProvider = null
-        val isGatewayProvider = positionProvider === externalGatewayProvider
-        externalGatewayProvider?.stop()
-        externalGatewayProvider = null
-        if (isGatewayProvider) {
-            gatewayPoseInterpolator = null
-            interpolatedPosition = null
+
+        val provider = externalGatewayProvider
+        if (provider != null) {
+            provider.stop()
+            externalGatewayProvider = null
+            positionProvider = null
 
             lifecycleScope.launch { gatewayManager.clearImplementConfiguration() }
             gatewayManager.disconnect()
             (activeImplemento as? ImplementoBase)?.updateExternalTelemetry(null)
+        } else {
+            positionProvider?.stop()
+            positionProvider = null
         }
+        gatewayPoseInterpolator = null
+        interpolatedPosition = null
         latestPose = null
-        updateGpsAccuracyIndicator(null)
-    }
 
-    private fun clearPositionProvider() {
-        stopDeviceProvider()
-        positionProvider?.stop()
-        positionProvider = null
         updateGpsAccuracyIndicator(null)
     }
 
     private fun applyImplementToPositionSources(snapshot: ImplementoSnapshot?) {
-        filteredDeviceProvider?.let { provider ->
-            val settings = gpsFilterSettings
-            val baseLong = settings.antennaToImplementMeters
-            val baseLat = settings.lateralOffsetMeters
-            val longitudinal = snapshot?.let {
-                (it.distanciaAntenaM ?: baseLong.toFloat()) + (it.offsetLongitudinalM ?: 0f)
-            } ?: baseLong.toFloat()
-            val lateral = snapshot?.offsetLateralM ?: baseLat.toFloat()
-            provider.updateOffsets(longitudinal.toDouble(), lateral.toDouble())
-            val articulated = settings.articulatedModeEnabled && (snapshot?.modoRastro?.equals("articulado", true) == true)
-            provider.setArticulatedMode(articulated)
-        }
-
         if (externalGatewayProvider != null) {
             val hardwareSnapshot = if (snapshot != null && snapshot.hardwareManaged) snapshot else null
             if (hardwareSnapshot == null) {
@@ -2889,9 +2778,7 @@ class MainActivity : AppCompatActivity() {
         hotCenterJob?.cancel()
         hotCenterJob = null
 
-        simulatorProvider?.stop()
-        simulatorProvider = null
-        clearPositionProvider()
+        stopGatewayProvider()
 
         if (::map.isInitialized) {
             implementOverlayRenderer?.clear()

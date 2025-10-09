@@ -17,6 +17,9 @@ class JobManager(
     private val recorder: JobRecorder,
     private val appScope: CoroutineScope
 ) {
+    companion object {
+        const val SOURCE_EXTERNAL_GATEWAY = "gateway"
+    }
     private val gson = Gson()
 
     private fun parseAndValidateImplementoSnapshot(json: String?): ImplementoSnapshot {
@@ -35,13 +38,12 @@ class JobManager(
     suspend fun createAndStart(
         name: String,
         snapshot: ImplementoSnapshot,
-        source: String
-    ): Long = withContext(Dispatchers.IO) {
+        ): Long = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val job = JobEntity(
             name = name,
             implementoSnapshotJson = gson.toJson(snapshot),
-            source = source,
+            source = SOURCE_EXTERNAL_GATEWAY,
             state = JobState.ACTIVE,
             createdAt = now,
             updatedAt = now
