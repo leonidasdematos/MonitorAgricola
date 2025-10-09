@@ -1279,15 +1279,11 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
                     }
 
-                    val nextPosition = if (usingSimulator) {
-                        pos
-                    } else {
-                        smoothingResult?.position ?: interpolatedPosition?.let {
-                            val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
-                            val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
-                            GeoPoint(lat, lon)
-                        } ?: pos
-                    }
+                    val nextPosition = smoothingResult?.position ?: interpolatedPosition?.let {
+                        val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
+                        val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
+                        GeoPoint(lat, lon)
+                    } ?: pos
 
                     interpolatedPosition = nextPosition
 
