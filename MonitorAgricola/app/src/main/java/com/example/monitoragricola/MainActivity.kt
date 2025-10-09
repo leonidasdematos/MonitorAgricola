@@ -1301,6 +1301,13 @@ class MainActivity : AppCompatActivity() {
                             ?: poseSnapshot?.headingDeg?.toFloat()?.takeIf { it.isFinite() }
                     }
                     val mapHeadingFromPose = headingFromPose?.let { implementHeadingToBearing(it) }
+                    var headingFromMovement: Float? = null
+                    lastPoint?.let { last ->
+                        val dist = last.distanceToAsDouble(currentPos)
+                        if (dist > 0.01) {
+                            headingFromMovement = calculateBearing(last, currentPos)
+                        }
+                    }
                     if (now - lastHotUpdate > 100) {
                         val lat = currentPos.latitude
                         val lon = currentPos.longitude
@@ -1332,10 +1339,11 @@ class MainActivity : AppCompatActivity() {
                     val skipRasterOps = suspendRasterUpdates > 0
                     // Mantém a geometria atualizada sempre e apenas pausa a pintura/telemetria.
                     implBase?.setRasterSuspended(skipRasterOps)
+                    val headingForImplement = headingFromPose ?: headingFromMovement
                     activeImplemento?.updatePosition(
                         last = lastPoint,
                         current = currentPos,
-                        headingDeg = headingFromPose,
+                        headingDeg = headingForImplement,
                         speedMps = poseSnapshot?.speedMps?.toFloat(),
                     )
 
@@ -1345,15 +1353,11 @@ class MainActivity : AppCompatActivity() {
                             map.setMapOrientation(-lastHeading)
                         }
                     } else {
-                        lastPoint?.let { last ->
-                            val dist = last.distanceToAsDouble(currentPos)
-                            if (dist > 0.01) {
-                                val heading = calculateBearing(last, currentPos)
-                                val diff = ((heading - lastHeading + 540) % 360) - 180
-                                if (abs(diff) > 0.1f && followTractor) {
-                                    lastHeading = (lastHeading + diff + 360) % 360
-                                    map.setMapOrientation(-lastHeading)
-                                }
+                        headingFromMovement?.let { heading ->
+                            val diff = ((heading - lastHeading + 540) % 360) - 180
+                            if (abs(diff) > 0.1f && followTractor) {
+                                lastHeading = (lastHeading + diff + 360) % 360
+                                map.setMapOrientation(-lastHeading)
                             }
                         }
                     }
@@ -1376,7 +1380,7 @@ class MainActivity : AppCompatActivity() {
                                 lon = currentPos.longitude,
                                 tMillis = System.currentTimeMillis(),
                                 speedKmh = poseSnapshot?.speedMps?.times(3.6)?.toFloat(),
-                                headingDeg = headingFromPose ?: lastHeading
+                                headingDeg = headingForImplement ?: lastHeading
                             )
                         }
                     }
@@ -1403,7 +1407,7 @@ class MainActivity : AppCompatActivity() {
                             if (::tvErroLateral.isInitialized) tvErroLateral.text = "Erro: ${"%.2f".format(it.lateralErrorM)} m"
                         }
                     }
-                    val headingForOverlay = headingFromPose
+                    val headingForOverlay = headingForImplement
                     updateImplementBarOverlay(lastPoint, currentPos, headingForOverlay)
 
                     lastPoint = currentPos
