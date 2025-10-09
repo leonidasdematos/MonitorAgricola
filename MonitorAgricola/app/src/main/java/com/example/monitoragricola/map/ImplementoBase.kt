@@ -142,6 +142,7 @@ abstract class ImplementoBase(
         headingDeg: Float?,
         speedMps: Float?,
     ) {
+
         if (last == null){ return }
 
         val proj = ProjectionHelper(current.latitude, current.longitude)
@@ -294,7 +295,10 @@ abstract class ImplementoBase(
         }
         val rightX = fwdY
         val rightY = -fwdX
-
+        if (paintModel == PaintModel.ARTICULADO) {
+            Log.d("ARTIC", "d=%.4f headingDeg=%s lastHeadingRad=%s fwd=(%.3f,%.3f) right=(%.3f,%.3f)"
+                .format(d, headingDeg, lastHeadingRad, fwdX, fwdY, rightX, rightY))
+        }
         val (lastImplLocal, curImplLocal) = when (paintModel) {
             PaintModel.ARTICULADO ->
                 computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
