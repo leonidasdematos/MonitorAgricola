@@ -2449,12 +2449,40 @@ class MainActivity : AppCompatActivity() {
             gatewayManager.implementTelemetry.collectLatest { telemetry ->
                 val implBase = activeImplemento as? ImplementoBase
                 if (telemetry != null) {
+                    val articulation = if (telemetry.articulated) {
+                        telemetry.articulation?.let { art ->
+                            val jointPoint = if (art.jointLat != null && art.jointLon != null) {
+                                GeoPoint(art.jointLat, art.jointLon)
+                            } else {
+                                null
+                            }
+                            val implementPoint = if (art.implementLat != null && art.implementLon != null) {
+                                GeoPoint(art.implementLat, art.implementLon)
+                            } else {
+                                null
+                            }
+                            ExternalTelemetry.Articulation(
+                                antennaToJointMeters = art.antennaToJointMeters,
+                                jointToImplementMeters = art.jointToImplementMeters,
+                                jointLatLon = jointPoint,
+                                implementLatLon = implementPoint,
+                                axisX = art.axisX,
+                                axisY = art.axisY,
+                                thetaRad = art.thetaRad,
+                                hasMotion = art.hasMotion,
+                            )
+                        }
+                    } else {
+                        null
+                    }
+
                     implBase?.updateExternalTelemetry(
                         ExternalTelemetry(
                             isImplementActive = telemetry.isImplementActive,
                             activeSectionsMask = telemetry.activeSectionsMask,
                             rateValue = telemetry.rateValue,
-                            timestampMillis = telemetry.timestampMillis
+                            timestampMillis = telemetry.timestampMillis,
+                            articulation = articulation,
                         )
                     )
                 } else {
