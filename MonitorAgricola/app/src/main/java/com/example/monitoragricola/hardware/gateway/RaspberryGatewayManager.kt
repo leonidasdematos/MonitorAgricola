@@ -365,12 +365,16 @@ class RaspberryGatewayManager(
                     val rate = implement.get("rate_value")?.asFloatOrNull()
                         ?: implement.get("rate")?.asFloatOrNull()
                         ?: implement.get("rate_lph")?.asFloatOrNull()
+                    val articulated = implement.get("articulated")?.asBooleanOrNull() ?: false
+                    val articulation = if (articulated) parseArticulationPayload(implement) else null
 
                     _implementTelemetry.value = GatewayImplementTelemetry(
                         isImplementActive = isActive,
                         activeSectionsMask = sectionsMask,
                         rateValue = rate,
                         timestampMillis = timestamp,
+                        articulated = articulated,
+                        articulation = articulation,
                     )
                 }
             } catch (ce: CancellationException) {
@@ -417,6 +421,47 @@ class RaspberryGatewayManager(
         }
         return mask
     }
+
+    private fun parseArticulationPayload(obj: JsonObject): GatewayImplementTelemetry.Articulation? {
+        val antennaToJoint = obj.get("antenna_to_articulation_m")?.asDoubleOrNull()
+        val jointToTool = obj.get("articulation_to_tool_m")?.asDoubleOrNull()
+        val axis = obj.get("axis")?.asDoubleListOrNull()
+        val theta = obj.get("theta_rad")?.asDoubleOrNull()
+        val hasMotion = obj.get("has_motion")?.asBooleanOrNull() ?: false
+        val jointLatLon = obj.get("joint_latlon")?.asDoubleListOrNull()
+        val implementLatLon = obj.get("implement_latlon")?.asDoubleListOrNull()
+        val antennaLocal = obj.get("antenna_xy_m")?.asDoubleListOrNull()
+        val jointLocal = obj.get("joint_xy_m")?.asDoubleListOrNull()
+        val implementLocal = obj.get("implement_xy_m")?.asDoubleListOrNull()
+
+        if (
+            antennaToJoint == null && jointToTool == null && axis == null && theta == null &&
+            jointLatLon == null && implementLatLon == null && antennaLocal == null &&
+            jointLocal == null && implementLocal == null && !hasMotion
+        ) {
+            return null
+        }
+
+        return GatewayImplementTelemetry.Articulation(
+            antennaToJointMeters = antennaToJoint?.toFloat(),
+            jointToImplementMeters = jointToTool?.toFloat(),
+            antennaLocalX = antennaLocal?.getOrNull(0),
+            antennaLocalY = antennaLocal?.getOrNull(1),
+            jointLocalX = jointLocal?.getOrNull(0),
+            jointLocalY = jointLocal?.getOrNull(1),
+            implementLocalX = implementLocal?.getOrNull(0),
+            implementLocalY = implementLocal?.getOrNull(1),
+            jointLat = jointLatLon?.getOrNull(0),
+            jointLon = jointLatLon?.getOrNull(1),
+            implementLat = implementLatLon?.getOrNull(0),
+            implementLon = implementLatLon?.getOrNull(1),
+            axisX = axis?.getOrNull(0),
+            axisY = axis?.getOrNull(1),
+            thetaRad = theta,
+            hasMotion = hasMotion,
+        )
+    }
+
 
     private fun updateCourseHeading(latitude: Double, longitude: Double, timestamp: Long): Double? {
         val previous = lastCourseFixForHeading
@@ -495,6 +540,16 @@ class RaspberryGatewayManager(
         }
     }
 
+    private fun JsonElement?.asDoubleListOrNull(): List<Double>? {
+        val array = this?.takeIf { it.isJsonArray }?.asJsonArray ?: return null
+        if (array.size() == 0) return emptyList()
+        val values = ArrayList<Double>(array.size())
+        for (element in array) {
+            val value = element.asDoubleOrNull() ?: return null
+            values += value
+        }
+        return values
+    }
 
     private suspend fun handleInfo(payload: JsonElement?, config: GatewayConnectionConfig, endpoint: ResolvedEndpoint) {
         if (payload == null || !payload.isJsonObject) {

@@ -175,9 +175,45 @@ abstract class ImplementoBase(
         val rightX = fwdY
         val rightY = -fwdX
 
+        val telemetry = latestExternalTelemetry
+        val articulatedPair = if (paintModel == PaintModel.ARTICULADO) {
+            telemetry?.articulation?.let { art ->
+                val currentImplLL = art.implementLatLon
+                val currentImplLocal = currentImplLL?.let { proj.toLocalMeters(it) }
+                if (currentImplLocal != null) {
+                    val previousImplLocal = lastImplCenterLL?.let { proj.toLocalMeters(it) } ?: currentImplLocal
+                    art.jointLatLon?.let { jointLL ->
+                        rememberArticulationLocal(proj.toLocalMeters(jointLL))
+                    }
+                    art.thetaRad?.let { implThetaRad = it }
+
+                    val axisXValue = art.axisX
+                    val axisYValue = art.axisY
+                    art.antennaToJointMeters?.toDouble()?.let { value -> artA = value }
+                    art.jointToImplementMeters?.toDouble()?.let { value -> artB = value }
+                    val aValue = artA
+                    val bValue = artB
+                    if (axisXValue != null && axisYValue != null && aValue != null && bValue != null) {
+                        rememberArticulationState(aValue, bValue, axisXValue, axisYValue)
+                    } else if (axisXValue != null && axisYValue != null) {
+                        val norm = hypot(axisXValue, axisYValue).coerceAtLeast(1e-9)
+                        this.axisX = axisXValue / norm
+                        this.axisY = axisYValue / norm
+                    }
+
+                    previousImplLocal to currentImplLocal
+                } else {
+                    null
+                }
+            }
+        } else {
+            null
+        }
+
         // Centros do implemento conforme o modo (continua atualizando mesmo pausado)
-        val (lastImplLocal, curImplLocal) = when (paintModel) {
-            PaintModel.ARTICULADO ->
+        val (lastImplLocal, curImplLocal) = when {
+            articulatedPair != null -> articulatedPair
+            paintModel == PaintModel.ARTICULADO ->
                 computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
                     ?: run {
                         computeRigidCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
@@ -229,7 +265,6 @@ abstract class ImplementoBase(
 
 
         // Pintura raster só quando rodando
-        val telemetry = latestExternalTelemetry
         val implementActive = telemetry?.isImplementActive ?: true
 
         if (running && !rasterSuspended && implementActive && dImpl >= EPS_IMPL) {
@@ -401,7 +436,19 @@ abstract class ImplementoBase(
         val activeSectionsMask: Int,
         val rateValue: Float?,
         val timestampMillis: Long,
-    )
+        val articulation: Articulation? = null,
+    ) {
+        data class Articulation(
+            val antennaToJointMeters: Float?,
+            val jointToImplementMeters: Float?,
+            val jointLatLon: GeoPoint?,
+            val implementLatLon: GeoPoint?,
+            val axisX: Double?,
+            val axisY: Double?,
+            val thetaRad: Double?,
+            val hasMotion: Boolean,
+        )
+    }
 
     open fun updateExternalTelemetry(telemetry: ExternalTelemetry?) {
         latestExternalTelemetry = telemetry
