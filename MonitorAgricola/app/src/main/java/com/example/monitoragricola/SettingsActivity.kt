@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,15 +26,26 @@ import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionState
 import kotlinx.coroutines.launch
+import com.example.monitoragricola.hardware.ntrip.NtripConfig
+import com.example.monitoragricola.hardware.ntrip.NtripConnectionState
+import com.example.monitoragricola.hardware.ntrip.NtripPreferences
 
 class SettingsActivity : AppCompatActivity() {
 
     private lateinit var btnGatewayConnect: Button
     private lateinit var tvGatewayDevice: TextView
     private lateinit var tvGatewayStatus: TextView
+    private lateinit var etNtripHost: EditText
+    private lateinit var etNtripPort: EditText
+    private lateinit var etNtripMount: EditText
+    private lateinit var etNtripUser: EditText
+    private lateinit var etNtripPassword: EditText
+    private lateinit var btnNtripConnect: Button
+    private lateinit var tvNtripStatus: TextView
 
     private val app get() = application as App
     private val gatewayManager get() = app.gatewayManager
+    private val ntripClient get() = app.ntripClient
     private val bluetoothAdapter: BluetoothAdapter? get() = BluetoothAdapter.getDefaultAdapter()
 
     private var pendingAction: PendingAction? = null
@@ -66,11 +78,22 @@ class SettingsActivity : AppCompatActivity() {
         btnGatewayConnect = findViewById(R.id.btnGatewayConnect)
         tvGatewayDevice = findViewById(R.id.tvGatewayDevice)
         tvGatewayStatus = findViewById(R.id.tvGatewayStatus)
+        etNtripHost = findViewById(R.id.etNtripHost)
+        etNtripPort = findViewById(R.id.etNtripPort)
+        etNtripMount = findViewById(R.id.etNtripMount)
+        etNtripUser = findViewById(R.id.etNtripUser)
+        etNtripPassword = findViewById(R.id.etNtripPassword)
+        btnNtripConnect = findViewById(R.id.btnNtripConnect)
+        tvNtripStatus = findViewById(R.id.tvNtripStatus)
 
         btnGatewayConnect.setOnClickListener { onGatewayConnectClicked() }
+        btnNtripConnect.setOnClickListener { onNtripConnectClicked() }
 
         updateGatewaySelectionSummary()
+        loadNtripPreferences()
         observeGatewayState()
+        observeNtripState()
+        updateNtripStatus(ntripClient.connectionState.value)
     }
 
     private fun observeGatewayState() {
@@ -82,6 +105,17 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
     }
+
+    private fun observeNtripState() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                ntripClient.connectionState.collect { state ->
+                    updateNtripStatus(state)
+                }
+            }
+        }
+    }
+
 
     private fun onGatewayConnectClicked() {
         val adapter = bluetoothAdapter
@@ -106,6 +140,31 @@ class SettingsActivity : AppCompatActivity() {
         }
         showDeviceSelectionDialog()
     }
+
+    private fun onNtripConnectClicked() {
+        val currentState = ntripClient.connectionState.value
+        if (currentState is NtripConnectionState.Connected || currentState is NtripConnectionState.Connecting) {
+            ntripClient.disconnect()
+            return
+        }
+        val config = readNtripConfigFromForm()
+        if (!config.isValid()) {
+            Toast.makeText(this, R.string.settings_ntrip_missing_fields, Toast.LENGTH_SHORT).show()
+            return
+        }
+        NtripPreferences.save(this, config)
+        ntripClient.ensureConnected(config)
+    }
+
+    private fun readNtripConfigFromForm(): NtripConfig {
+        val host = etNtripHost.text?.toString()?.trim().orEmpty()
+        val port = etNtripPort.text?.toString()?.toIntOrNull()?.coerceIn(1, 65535) ?: 2101
+        val mount = etNtripMount.text?.toString()?.trim().orEmpty()
+        val user = etNtripUser.text?.toString()?.trim().orEmpty()
+        val password = etNtripPassword.text?.toString().orEmpty()
+        return NtripConfig(host, port, mount, user, password)
+    }
+
 
     private fun hasBluetoothPermissions(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
@@ -223,6 +282,32 @@ class SettingsActivity : AppCompatActivity() {
         tvGatewayStatus.text = statusText
     }
 
+    private fun updateNtripStatus(state: NtripConnectionState) {
+        val statusText = when (state) {
+            NtripConnectionState.Disconnected -> getString(R.string.settings_ntrip_status_disconnected)
+            is NtripConnectionState.Connecting -> {
+                val label = describeNtripConfig(state.config)
+                getString(R.string.settings_ntrip_status_connecting_with, label)
+            }
+            is NtripConnectionState.Connected -> {
+                val label = describeNtripConfig(state.config)
+                getString(R.string.settings_ntrip_status_connected_with, label)
+            }
+            is NtripConnectionState.Error -> {
+                val reason = state.throwable.message ?: state.throwable.javaClass.simpleName
+                getString(R.string.settings_ntrip_status_error_with_reason, reason)
+            }
+        }
+        tvNtripStatus.text = statusText
+        val buttonText = if (state is NtripConnectionState.Connected || state is NtripConnectionState.Connecting) {
+            R.string.settings_ntrip_disconnect_button
+        } else {
+            R.string.settings_ntrip_connect_button
+        }
+        btnNtripConnect.setText(buttonText)
+    }
+
+
     private fun describeConfig(config: GatewayConnectionConfig): String {
         return when (config.medium) {
             GatewayConnectionMedium.BLUETOOTH -> {
@@ -238,6 +323,21 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
     }
+
+    private fun loadNtripPreferences() {
+        val config = NtripPreferences.load(this)
+        etNtripHost.setText(config.host)
+        etNtripPort.setText(config.port.takeIf { it > 0 }?.toString().orEmpty())
+        etNtripMount.setText(config.mountPoint)
+        etNtripUser.setText(config.username)
+        etNtripPassword.setText(config.password)
+    }
+
+    private fun describeNtripConfig(config: NtripConfig): String {
+        val mount = config.mountPoint.takeIf { it.isNotBlank() } ?: "?"
+        return getString(R.string.settings_ntrip_config_label, config.host, config.port, mount)
+    }
+
 
     private enum class PendingAction { ShowDevicePicker }
 }

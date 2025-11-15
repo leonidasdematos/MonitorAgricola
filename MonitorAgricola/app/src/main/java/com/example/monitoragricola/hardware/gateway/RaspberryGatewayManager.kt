@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import com.example.monitoragricola.gps.api.GpsPose
 import com.example.monitoragricola.gps.api.SOURCE_EXTERNAL_GATEWAY
@@ -33,7 +34,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -78,6 +81,11 @@ class RaspberryGatewayManager(
     private val stateMutex = Mutex()
     private val gson = Gson()
     private val implementStore = GatewayImplementStore(context.applicationContext)
+    private val rtkCorrections = MutableSharedFlow<ByteArray>(
+        replay = 0,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
 
     private var connectJob: Job? = null
     private var currentConfig: GatewayConnectionConfig? = null
@@ -216,8 +224,14 @@ class RaspberryGatewayManager(
                 }
             }
             Log.i(TAG, "Conectado ao gateway ${resolved.describe()}")
-            performHandshake(config, resolved, streams.reader, streams.writer)
-            listenLoop(config, resolved, streams.reader, streams.writer)
+            val writerMutex = Mutex()
+            performHandshake(config, resolved, streams.reader, streams.writer, writerMutex)
+            val rtkJob = scope.launch { pumpRtkCorrections(streams.writer, writerMutex) }
+            try {
+                listenLoop(config, resolved, streams.reader, streams.writer, writerMutex)
+            } finally {
+                rtkJob.cancelAndJoin()
+            }
         } catch (t: Throwable) {
             if (t is CancellationException) {
                 throw t
@@ -268,13 +282,14 @@ class RaspberryGatewayManager(
         endpoint: ResolvedEndpoint,
         reader: BufferedReader,
         writer: BufferedWriter,
-    ) {
+        writerMutex: Mutex,
+        ) {
         val helloPayload = JsonObject().apply {
             val subscribeArray = JsonArray().apply { add("telemetry/rtk") }
             add("subscribe", subscribeArray)
             add("subscriptions", JsonArray().apply { add("telemetry/rtk") })
         }
-        sendMessage(writer, "HELLO", helloPayload)
+        sendMessageLocked(writer, writerMutex, "HELLO", helloPayload)
 
         var helloAck: GatewayHelloAckPayload? = null
         while (helloAck == null) {
@@ -287,9 +302,9 @@ class RaspberryGatewayManager(
                     lastCapabilities = capabilities
                     lastProgramVersion = helloAck?.version
                     _connectionState.value = GatewayConnectionState.Connected(config, capabilities, helloAck?.version)
-                    sendMessage(writer, "INFO", JsonObject())
+                    sendMessageLocked(writer, writerMutex, "INFO", JsonObject())
                 }
-                "PING" -> sendMessage(writer, "PONG", JsonObject())
+                "PING" -> sendMessageLocked(writer, writerMutex, "PONG", JsonObject())
                 else -> Log.w(TAG, "Mensagem inesperada antes do HELLO_ACK: ${obj.type}")
             }
         }
@@ -301,22 +316,23 @@ class RaspberryGatewayManager(
         endpoint: ResolvedEndpoint,
         reader: BufferedReader,
         writer: BufferedWriter,
-    ) {
+        writerMutex: Mutex,
+        ) {
         lastCourseFixForHeading = null
         while (true) {
             val line = reader.safeReadLine() ?: break
             val envelope = parseEnvelope(line) ?: continue
             when (envelope.type) {
-                "PING" -> sendMessage(writer, "PONG", JsonObject())
+                "PING" -> sendMessageLocked(writer, writerMutex, "PONG", JsonObject())
                 "INFO" -> handleInfo(envelope.payload, config, endpoint)
-                "GNSS_FIX" -> handleGnssFix(envelope.payload, writer)
+                "GNSS_FIX" -> handleGnssFix(envelope.payload, writer, writerMutex)
                 else -> Log.d(TAG, "Mensagem não tratada: ${envelope.type}")
             }
         }
         Log.i(TAG, "Loop do gateway encerrado")
     }
 
-    private suspend fun handleGnssFix(payload: JsonElement?, writer: BufferedWriter) {
+    private suspend fun handleGnssFix(payload: JsonElement?, writer: BufferedWriter, writerMutex: Mutex) {
         val obj = payload?.takeIf { it.isJsonObject }?.asJsonObject
         val sequence = obj?.get("sequence")?.let { element -> element.asLongOrNull() }
         var status = "accepted"
@@ -391,11 +407,21 @@ class RaspberryGatewayManager(
                 addProperty("status", status)
                 addProperty("timestamp_ms", System.currentTimeMillis())
             }
-            sendMessage(writer, "GNSS_ACK", ackPayload)
+            sendMessageLocked(writer, writerMutex, "GNSS_ACK", ackPayload)
         } else {
             Log.w(TAG, "GNSS_FIX recebido sem sequence: $payload")
         }
     }
+
+    fun submitRtkCorrection(payload: ByteArray) {
+        if (_connectionState.value !is GatewayConnectionState.Connected) {
+            return
+        }
+        if (!rtkCorrections.tryEmit(payload)) {
+            scope.launch { rtkCorrections.emit(payload) }
+        }
+    }
+
 
     private fun parseSectionsMask(array: JsonArray?): Int {
         if (array == null) return 0
@@ -579,6 +605,16 @@ class RaspberryGatewayManager(
         }
     }
 
+    private suspend fun pumpRtkCorrections(writer: BufferedWriter, writerMutex: Mutex) {
+        rtkCorrections.collect { payload ->
+            val payloadObj = JsonObject().apply {
+                addProperty("timestamp_ms", System.currentTimeMillis())
+                addProperty("payload_base64", Base64.encodeToString(payload, Base64.NO_WRAP))
+            }
+            sendMessageLocked(writer, writerMutex, "RTK_CORRECTION", payloadObj)
+        }
+    }
+
     private fun parseEnvelope(line: String): GatewayEnvelope? {
         return try {
             val root = gson.fromJson(line, JsonObject::class.java)
@@ -601,6 +637,17 @@ class RaspberryGatewayManager(
             writer.write(json)
             writer.newLine()
             writer.flush()
+        }
+    }
+
+    private suspend fun sendMessageLocked(
+        writer: BufferedWriter,
+        mutex: Mutex,
+        type: String,
+        payload: JsonElement,
+    ) {
+        mutex.withLock {
+            sendMessage(writer, type, payload)
         }
     }
 

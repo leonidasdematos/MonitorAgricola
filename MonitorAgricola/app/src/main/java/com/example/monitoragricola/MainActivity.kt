@@ -1930,9 +1930,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateImplementBarOverlay(lastGps: GeoPoint?, currentGps: GeoPoint, headingDeg: Float?) {
-        Log.d("LastGPS:", lastGps.toString())
-        Log.d("currentGps:", currentGps.toString())
-        Log.d("Heading:", headingDeg.toString())
+        //Log.d("LastGPS:", lastGps.toString())
+        //Log.d("currentGps:", currentGps.toString())
+        //Log.d("Heading:", headingDeg.toString())
 
         val renderer = implementOverlayRenderer ?: return
         val implBase = activeImplemento as? ImplementoBase ?: run {

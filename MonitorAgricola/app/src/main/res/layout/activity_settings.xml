@@ -45,6 +45,76 @@
             android:layout_marginTop="4dp"
             android:text="@string/settings_gateway_status_disconnected" />
 
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="24dp"
+            android:background="@android:color/darker_gray" />
+
+        <TextView
+            android:id="@+id/tvNtripSectionTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/settings_ntrip_section_title"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/etNtripHost"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:hint="@string/settings_ntrip_host_hint"
+            android:inputType="textUri" />
+
+        <EditText
+            android:id="@+id/etNtripPort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/settings_ntrip_port_hint"
+            android:inputType="number"
+            android:text="2101" />
+
+        <EditText
+            android:id="@+id/etNtripMount"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/settings_ntrip_mount_hint"
+            android:inputType="text" />
+
+        <EditText
+            android:id="@+id/etNtripUser"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/settings_ntrip_username_hint"
+            android:inputType="textEmailAddress" />
+
+        <EditText
+            android:id="@+id/etNtripPassword"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/settings_ntrip_password_hint"
+            android:inputType="textPassword" />
+
+        <Button
+            android:id="@+id/btnNtripConnect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/settings_ntrip_connect_button" />
+
+        <TextView
+            android:id="@+id/tvNtripStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/settings_ntrip_status_disconnected" />
+
+
     </LinearLayout>
 
 </ScrollView>

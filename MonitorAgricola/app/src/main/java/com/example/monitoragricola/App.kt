@@ -3,16 +3,17 @@ package com.example.monitoragricola
 import com.example.monitoragricola.jobs.db.JobsDatabase
 import android.app.Application
 import androidx.room.Room
+import com.example.monitoragricola.hardware.gateway.RaspberryGatewayManager
+import com.example.monitoragricola.hardware.ntrip.NtripClient
 import com.example.monitoragricola.jobs.JobRecorder
 import com.example.monitoragricola.jobs.JobManager
 import com.example.monitoragricola.jobs.JobsRepository
 import com.example.monitoragricola.map.ImplementoBase
-import com.example.monitoragricola.hardware.gateway.RaspberryGatewayManager
+import com.example.monitoragricola.raster.store.RasterDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import com.example.monitoragricola.raster.store.RasterDatabase
 
 const val FREE_MODE_JOB_ID = 0L
 
@@ -105,6 +106,10 @@ class App : Application() {
 
     val gatewayManager: RaspberryGatewayManager by lazy {
         RaspberryGatewayManager(applicationContext, applicationScope)
+    }
+
+    val ntripClient: NtripClient by lazy {
+        NtripClient(applicationScope, gatewayManager)
     }
 
     class ImplementoStateStore {
