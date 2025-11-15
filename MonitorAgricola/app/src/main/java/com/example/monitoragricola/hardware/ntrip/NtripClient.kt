@@ -81,15 +81,16 @@ class NtripClient(
         val socket = Socket()
         try {
             withContext(Dispatchers.IO) {
-                socket.connect(InetSocketAddress(config.host, config.port), SOCKET_TIMEOUT_MS)
+                socket.connect(InetSocketAddress(config.host, config.port), SOCKET_CONNECT_TIMEOUT_MS)
+                socket.soTimeout = SOCKET_READ_TIMEOUT_MS
             }
             val input = BufferedInputStream(socket.getInputStream())
             val output = socket.getOutputStream()
             sendRequest(config, output)
+            maybeSendImmediateGga(output)
             val header = readHeader(input)
             validateResponse(header)
             _connectionState.value = NtripConnectionState.Connected(config)
-            maybeSendImmediateGga(output)
             val ggaJob = launch { pumpGgaLoop(output) }
             try {
                 readLoop(input)
@@ -151,6 +152,7 @@ class NtripClient(
     private suspend fun readHeader(inputStream: BufferedInputStream): String {
         val header = ByteArrayOutputStream()
         var lastFour = 0
+        var lastTwo = 0
         while (true) {
             val byte = withContext(Dispatchers.IO) { inputStream.read() }
             if (byte == -1) {
@@ -158,7 +160,8 @@ class NtripClient(
             }
             header.write(byte)
             lastFour = ((lastFour shl 8) or (byte and 0xFF)) and 0xFFFFFFFF.toInt()
-            if (lastFour == HEADER_DELIMITER) {
+            lastTwo = ((lastTwo shl 8) or (byte and 0xFF)) and 0xFFFF
+            if (lastFour == HEADER_CRLF_DELIMITER || lastTwo == HEADER_LF_DELIMITER) {
                 break
             }
         }
@@ -289,8 +292,10 @@ class NtripClient(
 
     companion object {
         private const val TAG = "NtripClient"
-        private const val SOCKET_TIMEOUT_MS = 10_000
-        private const val HEADER_DELIMITER = 0x0D0A0D0A // \r\n\r\n
+        private const val SOCKET_CONNECT_TIMEOUT_MS = 10_000
+        private const val SOCKET_READ_TIMEOUT_MS = 15_000
+        private const val HEADER_CRLF_DELIMITER = 0x0D0A0D0A // \r\n\r\n
+        private const val HEADER_LF_DELIMITER = 0x0A0A // \n\n
         private const val DEFAULT_NTRIP_PORT = 2101
         private const val GGA_INTERVAL_MS = 5_000L
         private const val MAX_GGA_POSE_AGE_MS = 30_000L
