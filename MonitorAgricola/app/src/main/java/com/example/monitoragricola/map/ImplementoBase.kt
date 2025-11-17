@@ -1,5 +1,6 @@
 package com.example.monitoragricola.map
 
+import android.os.SystemClock
 import android.util.Log
 import com.example.monitoragricola.raster.RasterCoverageEngine
 import org.locationtech.jts.geom.Coordinate
@@ -37,6 +38,7 @@ abstract class ImplementoBase(
     private var lastHeadingRad: Double? = null
 
     @Volatile private var latestExternalTelemetry: ExternalTelemetry? = null
+    private val telemetryInterpolator = ExternalTelemetryInterpolator()
 
     fun getImplementBarEndpoints(): Pair<GeoPoint, GeoPoint>? =
         if (lastBarP1 != null && lastBarP2 != null) lastBarP1!! to lastBarP2!! else null
@@ -175,7 +177,7 @@ abstract class ImplementoBase(
         val rightX = fwdY
         val rightY = -fwdX
 
-        val telemetry = latestExternalTelemetry
+        val telemetry = telemetryInterpolator.current()
         val articulatedPair = if (paintModel == PaintModel.ARTICULADO) {
             telemetry?.articulation?.let { art ->
                 val currentImplLL = art.implementLatLon
@@ -452,6 +454,7 @@ abstract class ImplementoBase(
 
     open fun updateExternalTelemetry(telemetry: ExternalTelemetry?) {
         latestExternalTelemetry = telemetry
+        telemetryInterpolator.onTelemetry(telemetry)
     }
 
     open class RuntimeState(var thetaRad: Double? = null, var telemetry: ExternalTelemetry? = null)
@@ -459,5 +462,143 @@ abstract class ImplementoBase(
     open fun importRuntimeState(state: RuntimeState?) {
         implThetaRad = state?.thetaRad
         latestExternalTelemetry = state?.telemetry
+        telemetryInterpolator.onTelemetry(state?.telemetry)
+    }
+
+    private class ExternalTelemetryInterpolator(
+        private val maxSegmentDurationMillis: Long = 1000L,
+        private val fallbackSegmentDurationMillis: Long = 200L,
+    ) {
+        private var previous: ExternalTelemetry? = null
+        private var current: ExternalTelemetry? = null
+        private var segmentStartRealtime = 0L
+        private var segmentDurationMillis = DEFAULT_SEGMENT_DURATION_MS
+
+        fun onTelemetry(telemetry: ExternalTelemetry?) {
+            if (telemetry == null) {
+                reset()
+                return
+            }
+            val now = SystemClock.elapsedRealtime()
+            if (current == null) {
+                previous = telemetry
+                current = telemetry
+                segmentStartRealtime = now
+                segmentDurationMillis = DEFAULT_SEGMENT_DURATION_MS
+                return
+            }
+
+            val last = current!!
+            previous = last
+            current = telemetry
+            segmentStartRealtime = now
+            segmentDurationMillis = computeSegmentDuration(last, telemetry)
+        }
+
+        fun current(): ExternalTelemetry? {
+            val cur = current ?: return null
+            val prev = previous ?: cur
+
+            val duration = segmentDurationMillis.coerceAtLeast(MIN_SEGMENT_DURATION_MS)
+            val elapsed = (SystemClock.elapsedRealtime() - segmentStartRealtime).coerceAtLeast(0L)
+            val progress = if (duration <= 0L) 1.0 else (elapsed.toDouble() / duration).coerceIn(0.0, 1.0)
+
+            if (progress <= 0.0 || cur.articulation?.hasMotion == false) return cur
+            if (progress >= 1.0) return cur
+
+            val interpolatedArticulation = interpolateArticulation(prev.articulation, cur.articulation, progress)
+
+            return ExternalTelemetry(
+                isImplementActive = cur.isImplementActive,
+                activeSectionsMask = cur.activeSectionsMask,
+                rateValue = cur.rateValue,
+                timestampMillis = cur.timestampMillis,
+                articulation = interpolatedArticulation,
+            )
+        }
+
+        private fun computeSegmentDuration(previous: ExternalTelemetry, current: ExternalTelemetry): Long {
+            val raw = (current.timestampMillis - previous.timestampMillis).coerceAtLeast(0L)
+            val maxDuration = maxSegmentDurationMillis.coerceAtLeast(MIN_SEGMENT_DURATION_MS)
+            val fallbackDuration = fallbackSegmentDurationMillis.coerceAtLeast(MIN_SEGMENT_DURATION_MS)
+            val duration = if (raw > 0L) raw.coerceAtMost(maxDuration) else fallbackDuration
+            return duration.coerceAtLeast(MIN_SEGMENT_DURATION_MS)
+        }
+
+        private fun interpolateArticulation(
+            previous: ExternalTelemetry.Articulation?,
+            current: ExternalTelemetry.Articulation?,
+            progress: Double,
+        ): ExternalTelemetry.Articulation? {
+            current ?: return previous
+            previous ?: return current
+
+            val axisX = interpolateDouble(previous.axisX, current.axisX, progress)
+            val axisY = interpolateDouble(previous.axisY, current.axisY, progress)
+            val norm = if (axisX != null && axisY != null) kotlin.math.hypot(axisX, axisY).coerceAtLeast(1e-9) else null
+            val normalizedAxisX = norm?.let { axisX!! / it } ?: current.axisX
+            val normalizedAxisY = norm?.let { axisY!! / it } ?: current.axisY
+
+            return ExternalTelemetry.Articulation(
+                antennaToJointMeters = current.antennaToJointMeters,
+                jointToImplementMeters = current.jointToImplementMeters,
+                jointLatLon = interpolateGeoPoint(previous.jointLatLon, current.jointLatLon, progress),
+                implementLatLon = interpolateGeoPoint(previous.implementLatLon, current.implementLatLon, progress),
+                axisX = normalizedAxisX,
+                axisY = normalizedAxisY,
+                thetaRad = interpolateAngle(previous.thetaRad, current.thetaRad, progress),
+                hasMotion = current.hasMotion,
+            )
+        }
+
+        private fun interpolateGeoPoint(prev: GeoPoint?, cur: GeoPoint?, progress: Double): GeoPoint? {
+            prev ?: return cur
+            cur ?: return prev
+            val lat = prev.latitude + (cur.latitude - prev.latitude) * progress
+            val lon = prev.longitude + (cur.longitude - prev.longitude) * progress
+            return GeoPoint(lat, lon)
+        }
+
+        private fun interpolateDouble(prev: Double?, cur: Double?, progress: Double): Double? {
+            prev ?: return cur
+            cur ?: return prev
+            return prev + (cur - prev) * progress
+        }
+
+        private fun interpolateAngle(prev: Double?, cur: Double?, progress: Double): Double? {
+            prev ?: return cur
+            cur ?: return prev
+            val base = wrapAngleNear(prev, cur)
+            val target = wrapAngleNear(cur, base)
+            val interpolated = base + (target - base) * progress
+            return wrapToSignedPi(interpolated)
+        }
+
+        private fun wrapAngleNear(value: Double, reference: Double): Double {
+            var candidate = value
+            var diff = candidate - reference
+            while (diff > Math.PI) { candidate -= 2 * Math.PI; diff = candidate - reference }
+            while (diff < -Math.PI) { candidate += 2 * Math.PI; diff = candidate - reference }
+            return candidate
+        }
+
+        private fun wrapToSignedPi(value: Double): Double {
+            var angle = value % (2 * Math.PI)
+            if (angle <= -Math.PI) angle += 2 * Math.PI
+            if (angle > Math.PI) angle -= 2 * Math.PI
+            return angle
+        }
+
+        private fun reset() {
+            previous = null
+            current = null
+            segmentStartRealtime = 0L
+            segmentDurationMillis = DEFAULT_SEGMENT_DURATION_MS
+        }
+
+        companion object {
+            private const val MIN_SEGMENT_DURATION_MS = 16L
+            private const val DEFAULT_SEGMENT_DURATION_MS = 200L
+        }
     }
 }
