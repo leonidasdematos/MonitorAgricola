@@ -182,10 +182,21 @@ abstract class ImplementoBase(
             telemetry?.articulation?.let { art ->
                 val currentImplLL = art.implementLatLon
                 val currentImplLocal = currentImplLL?.let { proj.toLocalMeters(it) }
+                    ?: run {
+                        val x = art.implementLocalX
+                        val y = art.implementLocalY
+                        if (x != null && y != null) Coordinate(curXY.x + x, curXY.y + y) else null
+                    }
                 if (currentImplLocal != null) {
                     val previousImplLocal = lastImplCenterLL?.let { proj.toLocalMeters(it) } ?: currentImplLocal
                     art.jointLatLon?.let { jointLL ->
                         rememberArticulationLocal(proj.toLocalMeters(jointLL))
+                    } ?: run {
+                        val x = art.jointLocalX
+                        val y = art.jointLocalY
+                        if (x != null && y != null) {
+                            rememberArticulationLocal(Coordinate(curXY.x + x, curXY.y + y))
+                        }
                     }
                     art.thetaRad?.let { implThetaRad = it }
 
@@ -443,6 +454,12 @@ abstract class ImplementoBase(
         data class Articulation(
             val antennaToJointMeters: Float?,
             val jointToImplementMeters: Float?,
+            val antennaLocalX: Double?,
+            val antennaLocalY: Double?,
+            val jointLocalX: Double?,
+            val jointLocalY: Double?,
+            val implementLocalX: Double?,
+            val implementLocalY: Double?,
             val jointLatLon: GeoPoint?,
             val implementLatLon: GeoPoint?,
             val axisX: Double?,
@@ -530,7 +547,7 @@ abstract class ImplementoBase(
             current: ExternalTelemetry.Articulation?,
             progress: Double,
         ): ExternalTelemetry.Articulation? {
-            current ?: return previous
+            if (current == null) return null
             previous ?: return current
 
             val axisX = interpolateDouble(previous.axisX, current.axisX, progress)
@@ -542,6 +559,12 @@ abstract class ImplementoBase(
             return ExternalTelemetry.Articulation(
                 antennaToJointMeters = current.antennaToJointMeters,
                 jointToImplementMeters = current.jointToImplementMeters,
+                antennaLocalX = interpolateDouble(previous.antennaLocalX, current.antennaLocalX, progress),
+                antennaLocalY = interpolateDouble(previous.antennaLocalY, current.antennaLocalY, progress),
+                jointLocalX = interpolateDouble(previous.jointLocalX, current.jointLocalX, progress),
+                jointLocalY = interpolateDouble(previous.jointLocalY, current.jointLocalY, progress),
+                implementLocalX = interpolateDouble(previous.implementLocalX, current.implementLocalX, progress),
+                implementLocalY = interpolateDouble(previous.implementLocalY, current.implementLocalY, progress),
                 jointLatLon = interpolateGeoPoint(previous.jointLatLon, current.jointLatLon, progress),
                 implementLatLon = interpolateGeoPoint(previous.implementLatLon, current.implementLatLon, progress),
                 axisX = normalizedAxisX,

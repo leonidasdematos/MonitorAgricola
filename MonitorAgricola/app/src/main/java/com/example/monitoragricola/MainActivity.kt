@@ -2464,6 +2464,12 @@ class MainActivity : AppCompatActivity() {
                             ExternalTelemetry.Articulation(
                                 antennaToJointMeters = art.antennaToJointMeters,
                                 jointToImplementMeters = art.jointToImplementMeters,
+                                antennaLocalX = art.antennaLocalX,
+                                antennaLocalY = art.antennaLocalY,
+                                jointLocalX = art.jointLocalX,
+                                jointLocalY = art.jointLocalY,
+                                implementLocalX = art.implementLocalX,
+                                implementLocalY = art.implementLocalY,
                                 jointLatLon = jointPoint,
                                 implementLatLon = implementPoint,
                                 axisX = art.axisX,
