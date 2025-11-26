@@ -2407,9 +2407,17 @@ class MainActivity : AppCompatActivity() {
     /* ======================= Permissão / providers ======================= */
 
     private fun startExternalGatewayProvider(forceReconnect: Boolean = false) {
+        gatewaySettings = GatewaySettingsPreferences.read(this)
+        val shouldInterpolateGatewayPoses = gatewaySettings.interpolateGatewayPoses
+
         if (!forceReconnect && externalGatewayProvider != null) {
             positionProvider = externalGatewayProvider
             externalGatewayProvider?.start()
+            gatewayPoseInterpolator = if (shouldInterpolateGatewayPoses) {
+                (gatewayPoseInterpolator ?: GatewayPoseInterpolator()).also { it.reset() }
+            } else {
+                null
+            }
             applyImplementToPositionSources(lastAppliedImplementoSnapshot)
             return
         }
@@ -2423,7 +2431,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         gpsFilterSettings = GpsFilterPreferences.read(this)
-        gatewaySettings = GatewaySettingsPreferences.read(this)
 
         gatewayTelemetryJob?.cancel()
         gatewayTelemetryJob = null
