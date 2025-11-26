@@ -178,8 +178,11 @@ abstract class ImplementoBase(
         val rightY = -fwdX
 
         val telemetry = telemetryInterpolator.current()
-        val articulatedPair = if (paintModel == PaintModel.ARTICULADO) {
-            telemetry?.articulation?.let { art ->
+        val articulationTelemetry = telemetry?.articulation
+        val useGatewayArticulation = articulationTelemetry != null &&
+                (paintModel == PaintModel.ARTICULADO || telemetry.mode?.equals("articulated", ignoreCase = true) == true)
+        val articulatedPair = if (useGatewayArticulation) {
+            articulationTelemetry?.let { art ->
                 val currentImplLL = art.implementLatLon
                 val currentImplLocal = currentImplLL?.let { proj.toLocalMeters(it) }
                     ?: run {
@@ -241,6 +244,17 @@ abstract class ImplementoBase(
             val jLL = proj.toLatLon(jLocal)
             lastArticulLL = GeoPoint(jLL.latitude, jLL.longitude)
             pendingArticulationLocal = null
+        }
+
+        if (telemetry != null) {
+            val mode = telemetry.mode ?: paintModel.key
+            val implFromGateway = articulationTelemetry?.implementLatLon
+            Log.i(
+                "ArticulationDebug",
+                "mode=$mode tractor=(${current.latitude},${current.longitude}) " +
+                        "implFromGateway=${implFromGateway?.let { "(${it.latitude},${it.longitude})" }} " +
+                        "implUsed=(${curImplLL.latitude},${curImplLL.longitude}) paintModel=${paintModel.name.lowercase()}"
+            )
         }
 
         var strokeRightOverride: Pair<Double, Double>? = null
@@ -449,6 +463,7 @@ abstract class ImplementoBase(
         val activeSectionsMask: Int,
         val rateValue: Float?,
         val timestampMillis: Long,
+        val mode: String? = null,
         val articulation: Articulation? = null,
     ) {
         data class Articulation(
@@ -530,6 +545,7 @@ abstract class ImplementoBase(
                 activeSectionsMask = cur.activeSectionsMask,
                 rateValue = cur.rateValue,
                 timestampMillis = cur.timestampMillis,
+                mode = cur.mode,
                 articulation = interpolatedArticulation,
             )
         }

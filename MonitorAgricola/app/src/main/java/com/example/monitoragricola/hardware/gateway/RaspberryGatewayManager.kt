@@ -412,14 +412,23 @@ class RaspberryGatewayManager(
                     val rate = implement.get("rate_value")?.asFloatOrNull()
                         ?: implement.get("rate")?.asFloatOrNull()
                         ?: implement.get("rate_lph")?.asFloatOrNull()
-                    val articulated = implement.get("articulated")?.asBooleanOrNull() ?: false
-                    val articulation = if (articulated) parseArticulationPayload(implement) else null
+                    val mode = implement.get("mode")?.asStringOrNull()?.lowercase()
+                    val articulatedField = implement.get("articulated")?.asBooleanOrNull()
+                    val hasArticulationPayload = implement.get("articulation") != null
+                    val articulated = articulatedField
+                        ?: (mode == "articulated" || hasArticulationPayload)
+                    val articulation = if (articulated || hasArticulationPayload) {
+                        parseArticulationPayload(implement)
+                    } else {
+                        null
+                    }
 
                     _implementTelemetry.value = GatewayImplementTelemetry(
                         isImplementActive = isActive,
                         activeSectionsMask = sectionsMask,
                         rateValue = rate,
                         timestampMillis = timestamp,
+                        mode = mode,
                         articulated = articulated,
                         articulation = articulation,
                     )
@@ -612,6 +621,15 @@ class RaspberryGatewayManager(
             values += value
         }
         return values
+    }
+
+    private fun JsonElement.asStringOrNull(): String? = when {
+        !isJsonPrimitive -> null
+        else -> try {
+            asJsonPrimitive.asString
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private suspend fun handleInfo(payload: JsonElement?, config: GatewayConnectionConfig, endpoint: ResolvedEndpoint) {

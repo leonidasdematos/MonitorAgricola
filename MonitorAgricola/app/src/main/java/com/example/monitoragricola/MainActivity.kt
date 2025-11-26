@@ -2488,6 +2488,7 @@ class MainActivity : AppCompatActivity() {
                             activeSectionsMask = telemetry.activeSectionsMask,
                             rateValue = telemetry.rateValue,
                             timestampMillis = telemetry.timestampMillis,
+                            mode = telemetry.mode,
                             articulation = articulation,
                         )
                     )

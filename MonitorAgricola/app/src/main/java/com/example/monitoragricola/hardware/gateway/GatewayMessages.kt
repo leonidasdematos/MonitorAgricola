@@ -49,6 +49,7 @@ data class GatewayImplementTelemetry(
     val activeSectionsMask: Int,
     val rateValue: Float?,
     val timestampMillis: Long,
+    val mode: String?,
     val articulated: Boolean,
     val articulation: Articulation?,
 ) {
