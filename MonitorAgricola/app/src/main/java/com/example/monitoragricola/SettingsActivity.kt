@@ -15,6 +15,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -25,6 +26,8 @@ import com.example.monitoragricola.hardware.gateway.GatewayConnectionConfig
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionState
+import com.example.monitoragricola.hardware.gateway.GatewaySettings
+import com.example.monitoragricola.hardware.gateway.GatewaySettingsPreferences
 import kotlinx.coroutines.launch
 import com.example.monitoragricola.hardware.ntrip.NtripConfig
 import com.example.monitoragricola.hardware.ntrip.NtripConnectionState
@@ -35,6 +38,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var btnGatewayConnect: Button
     private lateinit var tvGatewayDevice: TextView
     private lateinit var tvGatewayStatus: TextView
+    private lateinit var swGatewayInterpolation: SwitchCompat
     private lateinit var etNtripHost: EditText
     private lateinit var etNtripPort: EditText
     private lateinit var etNtripMount: EditText
@@ -49,6 +53,7 @@ class SettingsActivity : AppCompatActivity() {
     private val bluetoothAdapter: BluetoothAdapter? get() = BluetoothAdapter.getDefaultAdapter()
 
     private var pendingAction: PendingAction? = null
+    private var gatewaySettings: GatewaySettings = GatewaySettings()
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -78,6 +83,7 @@ class SettingsActivity : AppCompatActivity() {
         btnGatewayConnect = findViewById(R.id.btnGatewayConnect)
         tvGatewayDevice = findViewById(R.id.tvGatewayDevice)
         tvGatewayStatus = findViewById(R.id.tvGatewayStatus)
+        swGatewayInterpolation = findViewById(R.id.swGatewayInterpolation)
         etNtripHost = findViewById(R.id.etNtripHost)
         etNtripPort = findViewById(R.id.etNtripPort)
         etNtripMount = findViewById(R.id.etNtripMount)
@@ -89,6 +95,7 @@ class SettingsActivity : AppCompatActivity() {
         btnGatewayConnect.setOnClickListener { onGatewayConnectClicked() }
         btnNtripConnect.setOnClickListener { onNtripConnectClicked() }
 
+        loadGatewaySettings()
         updateGatewaySelectionSummary()
         loadNtripPreferences()
         observeGatewayState()
@@ -103,6 +110,15 @@ class SettingsActivity : AppCompatActivity() {
                     updateGatewayStatus(state)
                 }
             }
+        }
+    }
+
+    private fun loadGatewaySettings() {
+        gatewaySettings = GatewaySettingsPreferences.read(this)
+        swGatewayInterpolation.isChecked = gatewaySettings.interpolateGatewayPoses
+        swGatewayInterpolation.setOnCheckedChangeListener { _, isChecked ->
+            gatewaySettings = gatewaySettings.copy(interpolateGatewayPoses = isChecked)
+            GatewaySettingsPreferences.write(this, gatewaySettings)
         }
     }
 

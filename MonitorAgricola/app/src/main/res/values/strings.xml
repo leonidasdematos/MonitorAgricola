@@ -24,6 +24,8 @@
     <string name="settings_gateway_select_device">Selecione um dispositivo</string>
     <string name="settings_gateway_connecting_to">Conectando a %1$s…</string>
     <string name="settings_gateway_bluetooth_unavailable">Bluetooth indisponível neste dispositivo</string>
+    <string name="settings_gateway_interpolation_label">Interpolar coordenadas do gateway</string>
+    <string name="settings_gateway_interpolation_description">Desative para usar exatamente as coordenadas recebidas, sem suavização.</string>
     <string name="settings_ntrip_section_title">Correção RTK (NTRIP)</string>
     <string name="settings_ntrip_host_hint">Servidor (ex.: caster.exemplo.com)</string>
     <string name="settings_ntrip_port_hint">Porta (ex.: 2101)</string>
