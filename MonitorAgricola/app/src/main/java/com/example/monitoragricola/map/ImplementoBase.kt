@@ -178,9 +178,10 @@ abstract class ImplementoBase(
         val rightY = -fwdX
 
         val telemetry = telemetryInterpolator.current()
-        val articulationTelemetry = telemetry?.articulation
+        val effectivePaintModel = telemetry?.mode?.let { PaintModel.fromKey(it) } ?: paintModel
+        val articulationTelemetry = telemetry?.articulation?.takeIf { it.hasMotion }
         val useGatewayArticulation = articulationTelemetry != null &&
-                (paintModel == PaintModel.ARTICULADO || telemetry.mode?.equals("articulated", ignoreCase = true) == true)
+                (effectivePaintModel == PaintModel.ARTICULADO || telemetry.mode?.equals("articulated", ignoreCase = true) == true)
         val articulatedPair = if (useGatewayArticulation) {
             articulationTelemetry?.let { art ->
                 val currentImplLL = art.implementLatLon
@@ -229,7 +230,7 @@ abstract class ImplementoBase(
         // Centros do implemento conforme o modo (continua atualizando mesmo pausado)
         val (lastImplLocal, curImplLocal) = when {
             articulatedPair != null -> articulatedPair
-            paintModel == PaintModel.ARTICULADO ->
+            effectivePaintModel == PaintModel.ARTICULADO ->
                 computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
                     ?: run {
                         computeRigidCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
@@ -247,19 +248,19 @@ abstract class ImplementoBase(
         }
 
         if (telemetry != null) {
-            val mode = telemetry.mode ?: paintModel.key
+            val mode = telemetry.mode ?: effectivePaintModel.key
             val implFromGateway = articulationTelemetry?.implementLatLon
             Log.i(
                 "ArticulationDebug",
                 "mode=$mode tractor=(${current.latitude},${current.longitude}) " +
                         "implFromGateway=${implFromGateway?.let { "(${it.latitude},${it.longitude})" }} " +
-                        "implUsed=(${curImplLL.latitude},${curImplLL.longitude}) paintModel=${paintModel.name.lowercase()}"
+                        "implUsed=(${curImplLL.latitude},${curImplLL.longitude}) paintModel=${effectivePaintModel.name.lowercase()}"
             )
         }
 
         var strokeRightOverride: Pair<Double, Double>? = null
         // Barra (sempre atualiza)
-        val (barRightX, barRightY) = when (paintModel) {
+        val (barRightX, barRightY) = when (effectivePaintModel) {
             PaintModel.FIXO -> rightX to rightY
             PaintModel.ARTICULADO -> {
                 val ax = axisX

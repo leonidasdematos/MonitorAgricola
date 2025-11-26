@@ -9,7 +9,7 @@ enum class PaintModel(val key: String) {
     companion object {
         fun fromKey(k: String?): PaintModel = when (k?.lowercase()) {
             "fixo" -> FIXO
-            "articulado" -> ARTICULADO
+            "articulado", "articulated" -> ARTICULADO
             "entrada", "entrada_compensada", "compensada", "", null -> ENTRADA_COMPENSADA
             else -> ENTRADA_COMPENSADA
         }
