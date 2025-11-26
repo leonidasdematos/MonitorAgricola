@@ -81,11 +81,16 @@ class RaspberryGatewayManager(
     private val stateMutex = Mutex()
     private val gson = Gson()
     private val implementStore = GatewayImplementStore(context.applicationContext)
+    private val conversationLogger = GatewayConversationLogger(context.applicationContext, scope)
     private val rtkCorrections = MutableSharedFlow<ByteArray>(
         replay = 0,
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
+
+    init {
+        Log.i(TAG, "Logs do gateway serão gravados em ${conversationLogger.logDirectory().absolutePath}")
+    }
 
     private var connectJob: Job? = null
     private var currentConfig: GatewayConnectionConfig? = null
@@ -294,7 +299,20 @@ class RaspberryGatewayManager(
         var helloAck: GatewayHelloAckPayload? = null
         while (helloAck == null) {
             val line = reader.safeReadLine() ?: throw IllegalStateException("Gateway encerrou conexão durante HELLO")
-            val obj = parseEnvelope(line) ?: continue
+            val obj = parseEnvelope(line)
+            if (obj == null) {
+                conversationLogger.logMessage(
+                    GatewayConversationLogger.Direction.INBOUND,
+                    "UNKNOWN",
+                    line,
+                )
+                continue
+            }
+            conversationLogger.logMessage(
+                GatewayConversationLogger.Direction.INBOUND,
+                obj.type,
+                line,
+            )
             when (obj.type) {
                 "HELLO_ACK" -> {
                     helloAck = gson.fromJson(obj.payload, GatewayHelloAckPayload::class.java)
@@ -321,7 +339,20 @@ class RaspberryGatewayManager(
         lastCourseFixForHeading = null
         while (true) {
             val line = reader.safeReadLine() ?: break
-            val envelope = parseEnvelope(line) ?: continue
+            val envelope = parseEnvelope(line)
+            if (envelope == null) {
+                conversationLogger.logMessage(
+                    GatewayConversationLogger.Direction.INBOUND,
+                    "UNKNOWN",
+                    line,
+                )
+                continue
+            }
+            conversationLogger.logMessage(
+                GatewayConversationLogger.Direction.INBOUND,
+                envelope.type,
+                line,
+            )
             when (envelope.type) {
                 "PING" -> sendMessageLocked(writer, writerMutex, "PONG", JsonObject())
                 "INFO" -> handleInfo(envelope.payload, config, endpoint)
@@ -449,16 +480,22 @@ class RaspberryGatewayManager(
     }
 
     private fun parseArticulationPayload(obj: JsonObject): GatewayImplementTelemetry.Articulation? {
-        val antennaToJoint = obj.get("antenna_to_articulation_m")?.asDoubleOrNull()
-        val jointToTool = obj.get("articulation_to_tool_m")?.asDoubleOrNull()
-        val axis = obj.get("axis")?.asDoubleListOrNull()
-        val theta = obj.get("theta_rad")?.asDoubleOrNull()
-        val hasMotion = obj.get("has_motion")?.asBooleanOrNull() ?: false
-        val jointLatLon = obj.get("joint_latlon")?.asDoubleListOrNull()
-        val implementLatLon = obj.get("implement_latlon")?.asDoubleListOrNull()
-        val antennaLocal = obj.get("antenna_xy_m")?.asDoubleListOrNull()
-        val jointLocal = obj.get("joint_xy_m")?.asDoubleListOrNull()
-        val implementLocal = obj.get("implement_xy_m")?.asDoubleListOrNull()
+        val articulationObj = obj.getAsJsonObject("articulation")
+
+        fun resolve(field: String): JsonElement? {
+            return articulationObj?.get(field) ?: obj.get(field)
+        }
+
+        val antennaToJoint = resolve("antenna_to_articulation_m")?.asDoubleOrNull()
+        val jointToTool = resolve("articulation_to_tool_m")?.asDoubleOrNull()
+        val axis = resolve("axis")?.asDoubleListOrNull()
+        val theta = resolve("theta_rad")?.asDoubleOrNull()
+        val hasMotion = resolve("has_motion")?.asBooleanOrNull() ?: false
+        val jointLatLon = resolve("joint_latlon")?.asDoubleListOrNull()
+        val implementLatLon = resolve("implement_latlon")?.asDoubleListOrNull()
+        val antennaLocal = resolve("antenna_xy_m")?.asDoubleListOrNull()
+        val jointLocal = resolve("joint_xy_m")?.asDoubleListOrNull()
+        val implementLocal = resolve("implement_xy_m")?.asDoubleListOrNull()
 
         if (
             antennaToJoint == null && jointToTool == null && axis == null && theta == null &&
@@ -633,6 +670,11 @@ class RaspberryGatewayManager(
             add("payload", payload)
         }
         val json = gson.toJson(obj)
+        conversationLogger.logMessage(
+            GatewayConversationLogger.Direction.OUTBOUND,
+            type,
+            json,
+        )
         withContext(Dispatchers.IO) {
             writer.write(json)
             writer.newLine()
