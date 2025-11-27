@@ -250,12 +250,28 @@ abstract class ImplementoBase(
         if (telemetry != null) {
             val mode = telemetry.mode ?: effectivePaintModel.key
             val implFromGateway = articulationTelemetry?.implementLatLon
+            val implGatewayLocal = implFromGateway?.let { proj.toLocalMeters(it) }
+            val strokeStartLL = proj.toLatLon(lastImplLocal)
+            val strokeEndLL = proj.toLatLon(curImplLocal)
+
+            val startDelta = implGatewayLocal?.let {
+                "dRasterStart=(${(lastImplLocal.x - it.x).format3()},${(lastImplLocal.y - it.y).format3()})m"
+            }
+            val endDelta = implGatewayLocal?.let {
+                "dRasterEnd=(${(curImplLocal.x - it.x).format3()},${(curImplLocal.y - it.y).format3()})m"
+            }
+
             Log.i(
                 "ArticulationDebug",
-                "mode=$mode tractor=(${current.latitude},${current.longitude}) " +
-                        "implFromGateway=${implFromGateway?.let { "(${it.latitude},${it.longitude})" }} " +
-                        "implUsed=(${curImplLL.latitude},${curImplLL.longitude}) paintModel=${effectivePaintModel.name.lowercase()}"
-            )
+                "mode=$mode paintModel=${effectivePaintModel.name.lowercase()} " +
+                        "tractor=(${current.latitude},${current.longitude}) " +
+                        "implGateway=${implFromGateway?.let { "(${it.latitude},${it.longitude})" }} " +
+                        "implGatewayLocal=${implGatewayLocal?.let { "(${it.x.format3()},${it.y.format3()})" }} " +
+                        "implCenterUsed=(${curImplLL.latitude},${curImplLL.longitude}) " +
+                        "rasterStart=(${strokeStartLL.latitude},${strokeStartLL.longitude}) " +
+                        "rasterEnd=(${strokeEndLL.latitude},${strokeEndLL.longitude}) " +
+                        (startDelta?.let { "$it " } ?: "") +
+                        (endDelta ?: "")            )
         }
 
         var strokeRightOverride: Pair<Double, Double>? = null
