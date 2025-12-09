@@ -2,7 +2,6 @@ package com.example.monitoragricola.map
 
 import android.os.SystemClock
 import android.util.Log
-import java.util.Locale
 import org.osmdroid.util.GeoPoint
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -20,14 +19,12 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
         val headingDeg: Float?,
         val status: Map<String, Any>,
         val timestamp: Long,
-        val debugInfo: ImplementoBase.PreviewDebugInfo?,
         )
 
     private data class BarState(
         val p1: GeoPoint,
         val p2: GeoPoint,
         val center: GeoPoint?,
-        val articulation: GeoPoint?,
         val tractor: GeoPoint,
         val lengthMeters: Double,
         val bearingDeg: Double,
@@ -42,7 +39,6 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
         lastGps: GeoPoint?,
         currentGps: GeoPoint,
         headingDeg: Float?,
-        debugInfo: ImplementoBase.PreviewDebugInfo?,
     ) {
         if (!enabled) return
         val delta = lastGps?.distanceToAsDouble(currentGps)
@@ -53,14 +49,12 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
             headingDeg = headingDeg,
             status = statusCopy,
             timestamp = SystemClock.elapsedRealtime(),
-            debugInfo = debugInfo,
             )
     }
 
     fun onRendererUpdate(
         bar: Pair<GeoPoint, GeoPoint>?,
         center: GeoPoint?,
-        articulation: GeoPoint?,
         tractorPos: GeoPoint,
     ) {
         if (!enabled) return
@@ -86,7 +80,6 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
             p1 = p1,
             p2 = p2,
             center = center,
-            articulation = articulation,
             tractor = tractorPos,
             lengthMeters = length,
             bearingDeg = bearing,
@@ -155,24 +148,13 @@ class ImplementOverlayDebugTracer(private val enabled: Boolean) {
         ) { (key, value) -> "$key=${formatAny(value)}" }
         val deltaText = preview.deltaMeters?.format2()?.let { "${it}m" } ?: "∅"
         val headingText = preview.headingDeg?.toDouble()?.format2() ?: "∅"
-        val debugText = preview.debugInfo?.let { info ->
-            val forward = info.forwardVector.formatVec()
-            val right = info.rightVector.formatVec()
-            val theta = info.implThetaRad?.let { String.format("%.2f°", Math.toDegrees(it)) } ?: "∅"
-            "debug={disp=${info.displacementMeters.format3()}m, fwd=${info.forwardSource.name.lowercase(Locale.ROOT)}$forward, " +
-                    "right=${info.rightSource.name.lowercase(Locale.ROOT)}$right, articulated=${info.usedArticulatedCenters}, " +
-                    "axisActive=${info.articulationAxisActive}, paint=${info.paintModel.name.lowercase(Locale.ROOT)}, " +
-                    "headingIn=${info.headingDegInput?.toDouble()?.format2() ?: "∅"}, lastHeadingRad=${info.lastHeadingRad?.format2() ?: "∅"}, " +
-                    "implTheta=${theta}}"
-        } ?: "debug=∅"
-        return "previewAge=${age}ms, hadLast=${preview.hadLastFix}, Δ=${deltaText}, heading=${headingText}, ${statusSummary}, ${debugText}"    }
+        return "previewAge=${age}ms, hadLast=${preview.hadLastFix}, Δ=${deltaText}, heading=${headingText}, ${statusSummary}"
+    }
 
     private fun formatAny(value: Any): String = when (value) {
         is Number -> value.toDouble().format2()
         else -> value.toString()
     }
-
-    private fun Pair<Double, Double>.formatVec(): String = "(${first.format2()}, ${second.format2()})"
 
     private fun swapAnalysis(current: BarState, previous: BarState): SwapAnalysis {
         val direct = current.p1.distanceToAsDouble(previous.p1) + current.p2.distanceToAsDouble(previous.p2)

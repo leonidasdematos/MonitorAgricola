@@ -1947,13 +1947,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val previewDebug = if (lastGps != null) {
+        if (lastGps != null) {
             implBase.updateBarPreview(lastGps, currentGps, headingDeg)
-            implBase.consumePreviewDebugInfo()
-        } else {
-            null
         }
-        implementOverlayDebugTracer.onPreviewInput(implBase, lastGps, currentGps, headingDeg, previewDebug)
+        implementOverlayDebugTracer.onPreviewInput(implBase, lastGps, currentGps, headingDeg)
 
         val tractorPos = interpolatedPosition ?: tractor.position
         renderer.update(implBase, tractorPos)
@@ -2468,39 +2465,6 @@ class MainActivity : AppCompatActivity() {
             gatewayManager.implementTelemetry.collectLatest { telemetry ->
                 val implBase = activeImplemento as? ImplementoBase
                 if (telemetry != null) {
-                    val articulation = if (telemetry.articulated) {
-                        telemetry.articulation?.let { art ->
-                            val jointPoint = if (art.jointLat != null && art.jointLon != null) {
-                                GeoPoint(art.jointLat, art.jointLon)
-                            } else {
-                                null
-                            }
-                            val implementPoint = if (art.implementLat != null && art.implementLon != null) {
-                                GeoPoint(art.implementLat, art.implementLon)
-                            } else {
-                                null
-                            }
-                            ExternalTelemetry.Articulation(
-                                antennaToJointMeters = art.antennaToJointMeters,
-                                jointToImplementMeters = art.jointToImplementMeters,
-                                antennaLocalX = art.antennaLocalX,
-                                antennaLocalY = art.antennaLocalY,
-                                jointLocalX = art.jointLocalX,
-                                jointLocalY = art.jointLocalY,
-                                implementLocalX = art.implementLocalX,
-                                implementLocalY = art.implementLocalY,
-                                jointLatLon = jointPoint,
-                                implementLatLon = implementPoint,
-                                axisX = art.axisX,
-                                axisY = art.axisY,
-                                thetaRad = art.thetaRad,
-                                hasMotion = art.hasMotion,
-                            )
-                        }
-                    } else {
-                        null
-                    }
-
                     implBase?.updateExternalTelemetry(
                         ExternalTelemetry(
                             isImplementActive = telemetry.isImplementActive,
@@ -2508,8 +2472,12 @@ class MainActivity : AppCompatActivity() {
                             rateValue = telemetry.rateValue,
                             timestampMillis = telemetry.timestampMillis,
                             mode = telemetry.mode,
-                            articulation = articulation,
-                        )
+                            implementLatLon = if (telemetry.implementLat != null && telemetry.implementLon != null) {
+                                GeoPoint(telemetry.implementLat, telemetry.implementLon)
+                            } else {
+                                null
+                            },
+                            implementHeadingRad = telemetry.implementHeadingDeg?.let { Math.toRadians(it) },                        )
                     )
                 } else {
                     implBase?.updateExternalTelemetry(null)

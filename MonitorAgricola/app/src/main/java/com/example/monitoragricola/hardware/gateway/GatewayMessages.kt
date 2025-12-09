@@ -50,28 +50,11 @@ data class GatewayImplementTelemetry(
     val rateValue: Float?,
     val timestampMillis: Long,
     val mode: String?,
-    val articulated: Boolean,
-    val articulation: Articulation?,
-) {
-    data class Articulation(
-        val antennaToJointMeters: Float?,
-        val jointToImplementMeters: Float?,
-        val antennaLocalX: Double?,
-        val antennaLocalY: Double?,
-        val jointLocalX: Double?,
-        val jointLocalY: Double?,
-        val implementLocalX: Double?,
-        val implementLocalY: Double?,
-        val jointLat: Double?,
-        val jointLon: Double?,
-        val implementLat: Double?,
-        val implementLon: Double?,
-        val axisX: Double?,
-        val axisY: Double?,
-        val thetaRad: Double?,
-        val hasMotion: Boolean,
-    )
-}
+    val implementLat: Double?,
+    val implementLon: Double?,
+    val implementHeadingDeg: Double?,
+)
+
 
 
 /** Comandos de seção enviados pelo monitor ao gateway. */
