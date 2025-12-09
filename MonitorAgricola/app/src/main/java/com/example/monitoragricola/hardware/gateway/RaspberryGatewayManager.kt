@@ -40,6 +40,11 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.osmdroid.util.GeoPoint
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
 
 
 sealed class GatewayConnectionState {
@@ -76,16 +81,11 @@ class RaspberryGatewayManager(
     private val stateMutex = Mutex()
     private val gson = Gson()
     private val implementStore = GatewayImplementStore(context.applicationContext)
-    private val conversationLogger = GatewayConversationLogger(context.applicationContext, scope)
     private val rtkCorrections = MutableSharedFlow<ByteArray>(
         replay = 0,
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-
-    init {
-        Log.i(TAG, "Logs do gateway serão gravados em ${conversationLogger.logDirectory().absolutePath}")
-    }
 
     private var connectJob: Job? = null
     private var currentConfig: GatewayConnectionConfig? = null
@@ -93,6 +93,8 @@ class RaspberryGatewayManager(
     private var lastProgramVersion: String? = null
     private var lastImplementConfig: GatewayImplementConfiguration? = null
     private var activeImplementId: Int? = null
+    private var lastCourseFixForHeading: CourseFix? = null
+
 
     fun ensureConnected(config: GatewayConnectionConfig = GatewayConnectionConfig.default()) {
         scope.launch {
@@ -292,20 +294,7 @@ class RaspberryGatewayManager(
         var helloAck: GatewayHelloAckPayload? = null
         while (helloAck == null) {
             val line = reader.safeReadLine() ?: throw IllegalStateException("Gateway encerrou conexão durante HELLO")
-            val obj = parseEnvelope(line)
-            if (obj == null) {
-                conversationLogger.logMessage(
-                    GatewayConversationLogger.Direction.INBOUND,
-                    "UNKNOWN",
-                    line,
-                )
-                continue
-            }
-            conversationLogger.logMessage(
-                GatewayConversationLogger.Direction.INBOUND,
-                obj.type,
-                line,
-            )
+            val obj = parseEnvelope(line) ?: continue
             when (obj.type) {
                 "HELLO_ACK" -> {
                     helloAck = gson.fromJson(obj.payload, GatewayHelloAckPayload::class.java)
@@ -329,22 +318,10 @@ class RaspberryGatewayManager(
         writer: BufferedWriter,
         writerMutex: Mutex,
         ) {
+        lastCourseFixForHeading = null
         while (true) {
             val line = reader.safeReadLine() ?: break
-            val envelope = parseEnvelope(line)
-            if (envelope == null) {
-                conversationLogger.logMessage(
-                    GatewayConversationLogger.Direction.INBOUND,
-                    "UNKNOWN",
-                    line,
-                )
-                continue
-            }
-            conversationLogger.logMessage(
-                GatewayConversationLogger.Direction.INBOUND,
-                envelope.type,
-                line,
-            )
+            val envelope = parseEnvelope(line) ?: continue
             when (envelope.type) {
                 "PING" -> sendMessageLocked(writer, writerMutex, "PONG", JsonObject())
                 "INFO" -> handleInfo(envelope.payload, config, endpoint)
@@ -364,17 +341,24 @@ class RaspberryGatewayManager(
             Log.w(TAG, "GNSS_FIX com payload inválido: $payload")
         } else {
             try {
-                val timestampMillis = obj.get("timestamp")?.asDoubleOrNull()?.let { (it * 1000).toLong() }
+                val latitude = obj.get("latitude")?.asDoubleOrNull()
+                val longitude = obj.get("longitude")?.asDoubleOrNull()
+                if (latitude == null || longitude == null) {
+                    throw IllegalArgumentException("GNSS_FIX sem latitude/longitude")
+                }
+                val timestamp = obj.get("timestamp_ms")?.asLongOrNull()
                     ?: System.currentTimeMillis()
-                val tractor = obj.getAsJsonObject("tractor")
-                    ?: throw IllegalArgumentException("GNSS_FIX sem bloco 'tractor'")
-                val latitude = tractor.get("lat")?.asDoubleOrNull()
-                    ?: throw IllegalArgumentException("GNSS_FIX sem latitude")
-                val longitude = tractor.get("lon")?.asDoubleOrNull()
-                    ?: throw IllegalArgumentException("GNSS_FIX sem longitude")
-                val heading = tractor.get("heading_deg")?.asDoubleOrNull() ?: Double.NaN
-                val speed = tractor.get("speed_mps")?.asDoubleOrNull() ?: 0.0
-                val accuracy = tractor.get("accuracy_m")?.asDoubleOrNull() ?: 0.0
+                val fallbackHeading = updateCourseHeading(latitude, longitude, timestamp)
+                val heading = obj.get("heading_deg")?.asDoubleOrNull()?.takeIf { it.isFinite() }
+                    ?: obj.get("heading")?.asDoubleOrNull()?.takeIf { it.isFinite() }
+                    ?: fallbackHeading
+                    ?: Double.NaN
+                val speed = obj.get("speed_mps")?.asDoubleOrNull()
+                    ?: obj.get("speed")?.asDoubleOrNull()
+                    ?: 0.0
+                val accuracy = obj.get("accuracy_m")?.asDoubleOrNull()
+                    ?: obj.get("accuracy")?.asDoubleOrNull()
+                    ?: 0.0
 
                 val pose = GpsPose(
                     latitude = latitude,
@@ -382,30 +366,31 @@ class RaspberryGatewayManager(
                     headingDeg = heading,
                     speedMps = speed,
                     accuracyM = accuracy,
-                    timestampMillis = timestampMillis,
+                    timestampMillis = timestamp,
                     source = SOURCE_EXTERNAL_GATEWAY,
                 )
                 scope.launch { _poseFlow.emit(pose) }
 
                 obj.getAsJsonObject("implement")?.let { implement ->
                     val isActive = implement.get("active")?.asBooleanOrNull() ?: false
-                    val sectionsMask = implement.get("sections_mask")?.asDoubleOrNull()?.toInt() ?: 0
-
+                    val sectionsMask = if (isActive) {
+                        parseSectionsMask(implement.getAsJsonArray("sections"))
+                    } else {
+                        0
+                    }
                     val rate = implement.get("rate_value")?.asFloatOrNull()
-                    val mode = implement.get("mode")?.asStringOrNull()?.lowercase()
-                    val implementLat = implement.get("lat")?.asDoubleOrNull()
-                    val implementLon = implement.get("lon")?.asDoubleOrNull()
-                    val implementHeadingDeg = implement.get("heading_deg")?.asDoubleOrNull()
+                        ?: implement.get("rate")?.asFloatOrNull()
+                        ?: implement.get("rate_lph")?.asFloatOrNull()
+                    val articulated = implement.get("articulated")?.asBooleanOrNull() ?: false
+                    val articulation = if (articulated) parseArticulationPayload(implement) else null
 
                     _implementTelemetry.value = GatewayImplementTelemetry(
                         isImplementActive = isActive,
                         activeSectionsMask = sectionsMask,
                         rateValue = rate,
-                        timestampMillis = timestampMillis,
-                        mode = mode,
-                        implementLat = implementLat,
-                        implementLon = implementLon,
-                        implementHeadingDeg = implementHeadingDeg,
+                        timestampMillis = timestamp,
+                        articulated = articulated,
+                        articulation = articulation,
                     )
                 }
             } catch (ce: CancellationException) {
@@ -423,6 +408,8 @@ class RaspberryGatewayManager(
                 addProperty("timestamp_ms", System.currentTimeMillis())
             }
             sendMessageLocked(writer, writerMutex, "GNSS_ACK", ackPayload)
+        } else {
+            Log.w(TAG, "GNSS_FIX recebido sem sequence: $payload")
         }
     }
 
@@ -433,6 +420,104 @@ class RaspberryGatewayManager(
         if (!rtkCorrections.tryEmit(payload)) {
             scope.launch { rtkCorrections.emit(payload) }
         }
+    }
+
+
+    private fun parseSectionsMask(array: JsonArray?): Int {
+        if (array == null) return 0
+        var mask = 0
+        val count = min(array.size(), 32)
+        for (index in 0 until count) {
+            val element = array[index]
+            val active = when {
+                element.isJsonPrimitive -> {
+                    val primitive = element.asJsonPrimitive
+                    when {
+                        primitive.isBoolean -> primitive.asBoolean
+                        primitive.isNumber -> primitive.asInt != 0
+                        primitive.isString -> primitive.asString.toIntOrNull()?.let { it != 0 } ?: false
+                        else -> false
+                    }
+                }
+                else -> false
+            }
+            if (active) {
+                mask = mask or (1 shl index)
+            }
+        }
+        return mask
+    }
+
+    private fun parseArticulationPayload(obj: JsonObject): GatewayImplementTelemetry.Articulation? {
+        val antennaToJoint = obj.get("antenna_to_articulation_m")?.asDoubleOrNull()
+        val jointToTool = obj.get("articulation_to_tool_m")?.asDoubleOrNull()
+        val axis = obj.get("axis")?.asDoubleListOrNull()
+        val theta = obj.get("theta_rad")?.asDoubleOrNull()
+        val hasMotion = obj.get("has_motion")?.asBooleanOrNull() ?: false
+        val jointLatLon = obj.get("joint_latlon")?.asDoubleListOrNull()
+        val implementLatLon = obj.get("implement_latlon")?.asDoubleListOrNull()
+        val antennaLocal = obj.get("antenna_xy_m")?.asDoubleListOrNull()
+        val jointLocal = obj.get("joint_xy_m")?.asDoubleListOrNull()
+        val implementLocal = obj.get("implement_xy_m")?.asDoubleListOrNull()
+
+        if (
+            antennaToJoint == null && jointToTool == null && axis == null && theta == null &&
+            jointLatLon == null && implementLatLon == null && antennaLocal == null &&
+            jointLocal == null && implementLocal == null && !hasMotion
+        ) {
+            return null
+        }
+
+        return GatewayImplementTelemetry.Articulation(
+            antennaToJointMeters = antennaToJoint?.toFloat(),
+            jointToImplementMeters = jointToTool?.toFloat(),
+            antennaLocalX = antennaLocal?.getOrNull(0),
+            antennaLocalY = antennaLocal?.getOrNull(1),
+            jointLocalX = jointLocal?.getOrNull(0),
+            jointLocalY = jointLocal?.getOrNull(1),
+            implementLocalX = implementLocal?.getOrNull(0),
+            implementLocalY = implementLocal?.getOrNull(1),
+            jointLat = jointLatLon?.getOrNull(0),
+            jointLon = jointLatLon?.getOrNull(1),
+            implementLat = implementLatLon?.getOrNull(0),
+            implementLon = implementLatLon?.getOrNull(1),
+            axisX = axis?.getOrNull(0),
+            axisY = axis?.getOrNull(1),
+            thetaRad = theta,
+            hasMotion = hasMotion,
+        )
+    }
+
+
+    private fun updateCourseHeading(latitude: Double, longitude: Double, timestamp: Long): Double? {
+        val previous = lastCourseFixForHeading
+        lastCourseFixForHeading = CourseFix(latitude, longitude, timestamp)
+        if (previous == null) return null
+        if (timestamp <= previous.timestampMillis) {
+            return null
+        }
+
+        val distance = GeoPoint(previous.latitude, previous.longitude)
+            .distanceToAsDouble(GeoPoint(latitude, longitude))
+        if (distance < MIN_HEADING_DISTANCE_METERS) {
+            return null
+        }
+
+        val bearing = bearingBetween(previous.latitude, previous.longitude, latitude, longitude)
+        return bearing
+    }
+
+    private fun bearingBetween(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val phi1 = Math.toRadians(lat1)
+        val phi2 = Math.toRadians(lat2)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val y = sin(dLon) * cos(phi2)
+        val x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLon)
+        var bearing = Math.toDegrees(atan2(y, x))
+        if (bearing < 0.0) {
+            bearing += 360.0
+        }
+        return bearing
     }
 
     private fun JsonElement.asLongOrNull(): Long? = when {
@@ -481,13 +566,15 @@ class RaspberryGatewayManager(
         }
     }
 
-    private fun JsonElement.asStringOrNull(): String? = when {
-        !isJsonPrimitive -> null
-        else -> try {
-            asJsonPrimitive.asString
-        } catch (_: Throwable) {
-            null
+    private fun JsonElement?.asDoubleListOrNull(): List<Double>? {
+        val array = this?.takeIf { it.isJsonArray }?.asJsonArray ?: return null
+        if (array.size() == 0) return emptyList()
+        val values = ArrayList<Double>(array.size())
+        for (element in array) {
+            val value = element.asDoubleOrNull() ?: return null
+            values += value
         }
+        return values
     }
 
     private suspend fun handleInfo(payload: JsonElement?, config: GatewayConnectionConfig, endpoint: ResolvedEndpoint) {
@@ -546,11 +633,6 @@ class RaspberryGatewayManager(
             add("payload", payload)
         }
         val json = gson.toJson(obj)
-        conversationLogger.logMessage(
-            GatewayConversationLogger.Direction.OUTBOUND,
-            type,
-            json,
-        )
         withContext(Dispatchers.IO) {
             writer.write(json)
             writer.newLine()
@@ -687,6 +769,13 @@ class RaspberryGatewayManager(
         @SerializedName("width_m") val widthMeters: Double?,
     )
 
+    private data class CourseFix(
+        val latitude: Double,
+        val longitude: Double,
+        val timestampMillis: Long,
+    )
+
+
     companion object {
         private const val TAG = "GatewayManager"
         private const val SOCKET_CONNECT_TIMEOUT_MS = 5_000
@@ -700,5 +789,6 @@ class RaspberryGatewayManager(
             supportsSectionControl = true,
         )
 
+        private const val MIN_HEADING_DISTANCE_METERS = 0.05
     }
 }

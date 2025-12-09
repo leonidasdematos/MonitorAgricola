@@ -95,8 +95,6 @@ import com.example.monitoragricola.hardware.gateway.ExternalGatewayPositionProvi
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionConfig
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
-import com.example.monitoragricola.hardware.gateway.GatewaySettings
-import com.example.monitoragricola.hardware.gateway.GatewaySettingsPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayPoseInterpolator
 import com.example.monitoragricola.hardware.gateway.toGatewayConfiguration
 import com.example.monitoragricola.map.ImplementOverlayDebugTracer
@@ -251,7 +249,6 @@ class MainActivity : AppCompatActivity() {
     private var gatewaySyncJob: Job? = null
     private var latestPose: GpsPose? = null
     private var gpsFilterSettings: GpsFilterSettings = GpsFilterSettings()
-    private var gatewaySettings: GatewaySettings = GatewaySettings()
 
     private var lastSpeedCalcTime: Long = 0
     private var lastSpeedPoint: GeoPoint? = null
@@ -1243,7 +1240,7 @@ class MainActivity : AppCompatActivity() {
                 val rawFixMillis = externalGatewayProvider?.latestPose()?.timestampMillis ?: 0L
                 positionProvider?.getCurrentPosition()?.let { pos ->
                     val poseSnapshot = latestPose
-                    val smoothingResult = if (positionProvider === externalGatewayProvider && gatewaySettings.interpolateGatewayPoses) {
+                    val smoothingResult = if (positionProvider === externalGatewayProvider) {
                         gatewayPoseInterpolator?.current(now)
                     } else {
                         null
@@ -1257,15 +1254,11 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
                     }
 
-                    val nextPosition = if (positionProvider === externalGatewayProvider && !gatewaySettings.interpolateGatewayPoses) {
-                        pos
-                    } else {
-                        smoothingResult?.position ?: interpolatedPosition?.let {
-                            val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
-                            val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
-                            GeoPoint(lat, lon)
-                        } ?: pos
-                    }
+                    val nextPosition = smoothingResult?.position ?: interpolatedPosition?.let {
+                        val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
+                        val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
+                        GeoPoint(lat, lon)
+                    } ?: pos
 
                     interpolatedPosition = nextPosition
 
@@ -1947,10 +1940,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (lastGps != null) {
+        val previewDebug = if (lastGps != null) {
             implBase.updateBarPreview(lastGps, currentGps, headingDeg)
+            implBase.consumePreviewDebugInfo()
+        } else {
+            null
         }
-        implementOverlayDebugTracer.onPreviewInput(implBase, lastGps, currentGps, headingDeg)
+        implementOverlayDebugTracer.onPreviewInput(implBase, lastGps, currentGps, headingDeg, previewDebug)
 
         val tractorPos = interpolatedPosition ?: tractor.position
         renderer.update(implBase, tractorPos)
@@ -2404,17 +2400,9 @@ class MainActivity : AppCompatActivity() {
     /* ======================= Permissão / providers ======================= */
 
     private fun startExternalGatewayProvider(forceReconnect: Boolean = false) {
-        gatewaySettings = GatewaySettingsPreferences.read(this)
-        val shouldInterpolateGatewayPoses = gatewaySettings.interpolateGatewayPoses
-
         if (!forceReconnect && externalGatewayProvider != null) {
             positionProvider = externalGatewayProvider
             externalGatewayProvider?.start()
-            gatewayPoseInterpolator = if (shouldInterpolateGatewayPoses) {
-                (gatewayPoseInterpolator ?: GatewayPoseInterpolator()).also { it.reset() }
-            } else {
-                null
-            }
             applyImplementToPositionSources(lastAppliedImplementoSnapshot)
             return
         }
@@ -2440,11 +2428,7 @@ class MainActivity : AppCompatActivity() {
         externalGatewayProvider = provider
         positionProvider = provider
         latestPose = null
-        gatewayPoseInterpolator = if (gatewaySettings.interpolateGatewayPoses) {
-            GatewayPoseInterpolator().also { it.reset() }
-        } else {
-            null
-        }
+        gatewayPoseInterpolator = GatewayPoseInterpolator().also { it.reset() }
         interpolatedPosition = null
 
         val snapshot = lastAppliedImplementoSnapshot
@@ -2465,19 +2449,41 @@ class MainActivity : AppCompatActivity() {
             gatewayManager.implementTelemetry.collectLatest { telemetry ->
                 val implBase = activeImplemento as? ImplementoBase
                 if (telemetry != null) {
+                    val articulation = if (telemetry.articulated) {
+                        telemetry.articulation?.let { art ->
+                            val jointPoint = if (art.jointLat != null && art.jointLon != null) {
+                                GeoPoint(art.jointLat, art.jointLon)
+                            } else {
+                                null
+                            }
+                            val implementPoint = if (art.implementLat != null && art.implementLon != null) {
+                                GeoPoint(art.implementLat, art.implementLon)
+                            } else {
+                                null
+                            }
+                            ExternalTelemetry.Articulation(
+                                antennaToJointMeters = art.antennaToJointMeters,
+                                jointToImplementMeters = art.jointToImplementMeters,
+                                jointLatLon = jointPoint,
+                                implementLatLon = implementPoint,
+                                axisX = art.axisX,
+                                axisY = art.axisY,
+                                thetaRad = art.thetaRad,
+                                hasMotion = art.hasMotion,
+                            )
+                        }
+                    } else {
+                        null
+                    }
+
                     implBase?.updateExternalTelemetry(
                         ExternalTelemetry(
                             isImplementActive = telemetry.isImplementActive,
                             activeSectionsMask = telemetry.activeSectionsMask,
                             rateValue = telemetry.rateValue,
                             timestampMillis = telemetry.timestampMillis,
-                            mode = telemetry.mode,
-                            implementLatLon = if (telemetry.implementLat != null && telemetry.implementLon != null) {
-                                GeoPoint(telemetry.implementLat, telemetry.implementLon)
-                            } else {
-                                null
-                            },
-                            implementHeadingRad = telemetry.implementHeadingDeg?.let { Math.toRadians(it) },                        )
+                            articulation = articulation,
+                        )
                     )
                 } else {
                     implBase?.updateExternalTelemetry(null)
@@ -2490,9 +2496,7 @@ class MainActivity : AppCompatActivity() {
                 latestPose = pose
                 lastPositionMillis = pose.timestampMillis
                 speedEmaKmh = pose.speedMps * 3.6
-                if (gatewaySettings.interpolateGatewayPoses) {
-                    gatewayPoseInterpolator?.onPose(pose)
-                }
+                gatewayPoseInterpolator?.onPose(pose)
                 updateGpsAccuracyIndicator(pose)
             }
         }

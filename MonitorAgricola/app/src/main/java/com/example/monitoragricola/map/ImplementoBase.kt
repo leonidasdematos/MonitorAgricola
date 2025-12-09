@@ -5,9 +5,13 @@ import android.util.Log
 import com.example.monitoragricola.raster.RasterCoverageEngine
 import org.locationtech.jts.geom.Coordinate
 import org.osmdroid.util.GeoPoint
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.sin
+
 
 abstract class ImplementoBase(
     private val rasterEngine: RasterCoverageEngine,           // ⬅️ antes era AreaManager
@@ -27,22 +31,56 @@ abstract class ImplementoBase(
     // ===== cache dos endpoints da barra (lat/lon) =====
     private var lastBarP1: GeoPoint? = null
     private var lastBarP2: GeoPoint? = null
-    private var lastHitchLL: GeoPoint? = null
+
+    private val EPS_STEP = 0.01
+    private val EPS_IMPL = 0.01
+
+    private var lastHeadingRad: Double? = null
+
+    @Volatile private var latestExternalTelemetry: ExternalTelemetry? = null
+    private val telemetryInterpolator = ExternalTelemetryInterpolator()
 
     fun getImplementBarEndpoints(): Pair<GeoPoint, GeoPoint>? =
         if (lastBarP1 != null && lastBarP2 != null) lastBarP1!! to lastBarP2!! else null
 
-    // ===== cache do centro do implemento =====
-    private val EPS_IMPL = 0.01
-    private var lastHeadingRad: Double? = null
+    // ===== cache do centro do implemento e da articulação (lat/lon) =====
     private var lastImplCenterLL: GeoPoint? = null
+    private var lastArticulLL: GeoPoint? = null
     fun getImplementCenter(): GeoPoint? = lastImplCenterLL
-    fun getImplementHitch(): GeoPoint? = lastHitchLL
+    fun getArticulationPoint(): GeoPoint? = lastArticulLL
 
-    private var previousImplLocal: Coordinate? = null
+    // --- estado/articulação persistente ---
+    private var artA: Double? = null
+    private var artB: Double? = null
+    private var axisX: Double? = null
+    private var axisY: Double? = null
 
-    @Volatile private var latestExternalTelemetry: ExternalTelemetry? = null
-    private val telemetryInterpolator = ExternalTelemetryInterpolator()
+    private var pendingArticulationLocal: Coordinate? = null
+    protected fun rememberArticulationLocal(local: Coordinate?) {
+        pendingArticulationLocal = local
+    }
+
+    data class PreviewDebugInfo(
+        val displacementMeters: Double,
+        val forwardVector: Pair<Double, Double>,
+        val forwardSource: ForwardSource,
+        val rightVector: Pair<Double, Double>,
+        val rightSource: RightSource,
+        val usedArticulatedCenters: Boolean,
+        val articulationAxisActive: Boolean,
+        val paintModel: PaintModel,
+        val headingDegInput: Float?,
+        val lastHeadingRad: Double?,
+        val implThetaRad: Double?,
+    ) {
+        enum class ForwardSource { DISPLACEMENT, POSE_HEADING, CACHED_HEADING, DEFAULT_NORTH }
+        enum class RightSource { FORWARD_PERP, DISPLACEMENT_PERP, ARTICULATION_AXIS, FALLBACK_PERP }
+    }
+
+    @Volatile private var lastPreviewDebug: PreviewDebugInfo? = null
+
+    fun consumePreviewDebugInfo(): PreviewDebugInfo? = lastPreviewDebug.also { lastPreviewDebug = null }
+
 
     protected abstract fun getWorkWidthMeters(): Float
 
@@ -56,15 +94,48 @@ abstract class ImplementoBase(
         offsetLongitudinal?.let { this.offsetLongitudinal = it }
     }
 
+    /** Para o modo ARTICULADO: subclasse pode sobrescrever e também chamar rememberArticulationLocal(...) */
+    protected open fun computeArticulatedCenters(
+        lastXY: Coordinate,
+        curXY: Coordinate,
+        fwdX: Double, fwdY: Double,
+        rightX: Double, rightY: Double
+    ): Pair<Coordinate, Coordinate>? = null
+
+    /** Caminho rígido (offset fixo em relação à antena). */
+    private fun computeRigidCenters(
+        lastXY: Coordinate,
+        curXY:  Coordinate,
+        fwdX: Double, fwdY: Double,
+        rightX: Double, rightY: Double
+    ): Pair<Coordinate, Coordinate> {
+        val longOffset = (distanciaAntena + offsetLongitudinal).toDouble()
+        val dX = -longOffset * fwdX + offsetLateral.toDouble() * rightX
+        val dY = -longOffset * fwdY + offsetLateral.toDouble() * rightY
+        val lastImplLocal = Coordinate(lastXY.x + dX, lastXY.y + dY)
+        val curImplLocal  = Coordinate(curXY.x  + dX, curXY.y  + dY)
+        return lastImplLocal to curImplLocal
+    }
+
     override fun start() { running = true }
     override fun stop()  { running = false }
 
     /**
      * Suspende temporariamente a pintura no raster, mantendo o restante da geometria
-     * atualizada (centro e barra).
+     * atualizada (centro, barra, articulação).
      */
     fun setRasterSuspended(suspended: Boolean) {
         rasterSuspended = suspended
+    }
+
+    private fun minHeadingStep(speedMps: Float?, hasExternalHeading: Boolean): Double {
+        val speed = speedMps?.let { abs(it) } ?: return EPS_STEP
+        return when {
+            speed < 0.05f -> if (hasExternalHeading) Double.POSITIVE_INFINITY else 0.15
+            speed < 0.2f -> 0.08
+            speed < 0.5f -> 0.03
+            else -> EPS_STEP
+        }
     }
 
     override fun updatePosition(
@@ -73,134 +144,284 @@ abstract class ImplementoBase(
         headingDeg: Float?,
         speedMps: Float?,
     ) {
-        val geom = computeGeometry(current, headingDeg) ?: return
 
-        if (running && !rasterSuspended && telemetryInterpolator.current()?.isImplementActive == true &&
-            geom.deltaSinceLast >= EPS_IMPL
-        ) {
+        if (last == null){ return }
+
+        val proj = ProjectionHelper(current.latitude, current.longitude)
+        val lastXY = proj.toLocalMeters(last)
+        val curXY  = proj.toLocalMeters(current)
+
+        val vx = curXY.x - lastXY.x
+        val vy = curXY.y - lastXY.y
+        val dist = hypot(vx, vy)
+
+        // Atualize o heading SEMPRE que houver qualquer variação mensurável
+        val headingRadFromPose = headingDeg?.takeIf { it.isFinite() }?.toDouble()?.let { Math.toRadians(it) }
+        headingRadFromPose?.let { lastHeadingRad = it }
+
+        val headingStep = minHeadingStep(speedMps, headingRadFromPose != null)
+        val useDisplacementForHeading = dist >= headingStep
+        if (useDisplacementForHeading) {
+            lastHeadingRad = atan2(vx, vy)
+        }
+
+        val vectorThreshold = max(EPS_STEP, headingStep)
+        val (fwdX, fwdY) = if (dist >= vectorThreshold) {
+            (vx / dist) to (vy / dist)
+        } else {
+            // Passo muito pequeno: use o heading cacheado; se não houver, assuma norte
+            val th = lastHeadingRad ?: 0.0
+
+            sin(th) to cos(th)
+        }
+        val rightX = fwdY
+        val rightY = -fwdX
+
+        val telemetry = telemetryInterpolator.current()
+        val articulatedPair = if (paintModel == PaintModel.ARTICULADO) {
+            telemetry?.articulation?.let { art ->
+                val currentImplLL = art.implementLatLon
+                val currentImplLocal = currentImplLL?.let { proj.toLocalMeters(it) }
+                if (currentImplLocal != null) {
+                    val previousImplLocal = lastImplCenterLL?.let { proj.toLocalMeters(it) } ?: currentImplLocal
+                    art.jointLatLon?.let { jointLL ->
+                        rememberArticulationLocal(proj.toLocalMeters(jointLL))
+                    }
+                    art.thetaRad?.let { implThetaRad = it }
+
+                    val axisXValue = art.axisX
+                    val axisYValue = art.axisY
+                    art.antennaToJointMeters?.toDouble()?.let { value -> artA = value }
+                    art.jointToImplementMeters?.toDouble()?.let { value -> artB = value }
+                    val aValue = artA
+                    val bValue = artB
+                    if (axisXValue != null && axisYValue != null && aValue != null && bValue != null) {
+                        rememberArticulationState(aValue, bValue, axisXValue, axisYValue)
+                    } else if (axisXValue != null && axisYValue != null) {
+                        val norm = hypot(axisXValue, axisYValue).coerceAtLeast(1e-9)
+                        this.axisX = axisXValue / norm
+                        this.axisY = axisYValue / norm
+                    }
+
+                    previousImplLocal to currentImplLocal
+                } else {
+                    null
+                }
+            }
+        } else {
+            null
+        }
+
+        // Centros do implemento conforme o modo (continua atualizando mesmo pausado)
+        val (lastImplLocal, curImplLocal) = when {
+            articulatedPair != null -> articulatedPair
+            paintModel == PaintModel.ARTICULADO ->
+                computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
+                    ?: run {
+                        computeRigidCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
+                    }
+            else -> computeRigidCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
+        }
+
+        // Centro e articulação (cache)
+        val curImplLL = proj.toLatLon(curImplLocal)
+        lastImplCenterLL = GeoPoint(curImplLL.latitude, curImplLL.longitude)
+        pendingArticulationLocal?.let { jLocal ->
+            val jLL = proj.toLatLon(jLocal)
+            lastArticulLL = GeoPoint(jLL.latitude, jLL.longitude)
+            pendingArticulationLocal = null
+        }
+
+        var strokeRightOverride: Pair<Double, Double>? = null
+        // Barra (sempre atualiza)
+        val (barRightX, barRightY) = when (paintModel) {
+            PaintModel.FIXO -> rightX to rightY
+            PaintModel.ARTICULADO -> {
+                val ax = axisX
+                val ay = axisY
+                if (ax != null && ay != null) {
+                    val rx = ay
+                    val ry = -ax
+                    strokeRightOverride = rx to ry
+                    rx to ry
+                } else {
+                    val dx = curImplLocal.x - lastImplLocal.x
+                    val dy = curImplLocal.y - lastImplLocal.y
+                    val d  = hypot(dx, dy)
+                    val fallback = if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+                    strokeRightOverride = fallback
+                    fallback
+                }
+            }
+            else -> {
+                val dx = curImplLocal.x - lastImplLocal.x
+                val dy = curImplLocal.y - lastImplLocal.y
+                val d  = hypot(dx, dy)
+                if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+            }
+        }
+
+        // Passo do implemento (p/ decidir pintar)
+        val dImpl = hypot(curImplLocal.x - lastImplLocal.x, curImplLocal.y - lastImplLocal.y)
+        val w = getWorkWidthMeters()
+
+
+        // Pintura raster só quando rodando
+        val implementActive = telemetry?.isImplementActive ?: true
+
+        if (running && !rasterSuspended && implementActive && dImpl >= EPS_IMPL) {
+            val lastImplLL = proj.toLatLon(lastImplLocal)
+            val curImplLL2 = proj.toLatLon(curImplLocal)
+            val lastImpl = GeoPoint(lastImplLL.latitude, lastImplLL.longitude)
+            val curImpl  = GeoPoint(curImplLL2.latitude,  curImplLL2.longitude)
 
             try {
+
                 rasterEngine.paintStroke(
-                    last = geom.lastImplLL,
-                    current = geom.curImplLL,
-                    implementWidthMeters = geom.workWidth,
-                    activeSectionsMask = geom.telemetry.activeSectionsMask,
-                    rateValue = geom.telemetry.rateValue,
-                    strokeRightX = geom.rightX,
-                    strokeRightY = geom.rightY,
+                    last = lastImpl,
+                    current = curImpl,
+                    implementWidthMeters = w.toDouble(),
+                    activeSectionsMask = telemetry?.activeSectionsMask ?: 0,
+                    rateValue = telemetry?.rateValue,
+                    strokeRightX = strokeRightOverride?.first,
+                    strokeRightY = strokeRightOverride?.second
                 )
+
             } catch (t: Throwable) {
                 Log.e("ImplementoBase", "Falha ao pintar área (raster): ${t.message}")
             }
         }
 
-        lastBarP1 = geom.barP1
-        lastBarP2 = geom.barP2
-        lastImplCenterLL = geom.curImplLL
-        lastHitchLL = geom.hitchLL
-    }
-
-    fun updateBarPreview(last: GeoPoint?, current: GeoPoint, headingDeg: Float?) {
-        val geom = computeGeometry(current, headingDeg) ?: return
-
-        lastBarP1 = geom.barP1
-        lastBarP2 = geom.barP2
-        lastImplCenterLL = geom.curImplLL
-        lastHitchLL = geom.hitchLL
-
-    }
-
-    /** Parâmetros locais de articulação (A = antena→engate, B = engate→centro implemento). */
-    protected open fun getArticulationParameters(): ArticulationParameters? = null
-
-    /**
-     * Calcula a geometria atual do implemento a partir da telemetria simplificada.
-     * Convenção: heading_deg 0° = norte, cresce sentido horário.
-     * Vetor forward = (sin(th), cos(th)); vetor right = (cos(th), -sin(th)).
-     */
-    private fun computeGeometry(current: GeoPoint, headingDeg: Float?): GeometryResult? {
-        val telemetry = telemetryInterpolator.current() ?: return null
-        val implementPoint = telemetry.implementLatLon ?: return null
-
-        val isArticulatedMode = telemetry.mode?.lowercase() == "articulated" || paintModel == PaintModel.ARTICULADO
-        val headingRad = when {
-            isArticulatedMode -> telemetry.implementHeadingRad
-            else -> telemetry.implementHeadingRad ?: headingDeg?.let { Math.toRadians(it.toDouble()) }
-        } ?: return null
-
-        val proj = ProjectionHelper(current.latitude, current.longitude)
-        val curImplLocal = proj.toLocalMeters(implementPoint)
-        val lastImplLocal = previousImplLocal ?: curImplLocal
-        previousImplLocal = curImplLocal
-
-        lastHeadingRad = headingRad
-        implThetaRad = headingRad
-
-        val fwdX = sin(headingRad)
-        val fwdY = cos(headingRad)
-        val rightX = fwdY
-        val rightY = -fwdX
-
-        val workWidth = getWorkWidthMeters().toDouble()
-        val half = workWidth / 2.0
-
-        val p1Local = Coordinate(curImplLocal.x - half * rightX, curImplLocal.y - half * rightY)
-        val p2Local = Coordinate(curImplLocal.x + half * rightX, curImplLocal.y + half * rightY)
-
+        val half = (w / 2.0).toDouble()
+        val p1Local = Coordinate(curImplLocal.x - half * barRightX, curImplLocal.y - half * barRightY)
+        val p2Local = Coordinate(curImplLocal.x + half * barRightX, curImplLocal.y + half * barRightY)
         val p1LL = proj.toLatLon(p1Local)
         val p2LL = proj.toLatLon(p2Local)
+        lastBarP1 = GeoPoint(p1LL.latitude, p1LL.longitude)
+        lastBarP2 = GeoPoint(p2LL.latitude, p2LL.longitude)
+    }
+    private fun Double.format3() = String.format("%.3f", this)
+
+
+
+    fun updateBarPreview(last: GeoPoint?, current: GeoPoint, headingDeg: Float?) {
+        if (last == null) return
+
+        val w = getWorkWidthMeters()
+        val half = (w / 2.0).toDouble()
+
+        val proj = ProjectionHelper(current.latitude, current.longitude)
+        val lastXY = proj.toLocalMeters(last)
+        val curXY  = proj.toLocalMeters(current)
+
+        var vx = curXY.x - lastXY.x
+        var vy = curXY.y - lastXY.y
+        var d  = hypot(vx, vy)
+
+        val (fwdX, fwdY) = if (d >= 0.01) {
+            vx /= d; vy /= d; vx to vy
+        } else {
+            val th = headingDeg?.toDouble()?.let { it * Math.PI / 180.0 } ?: lastHeadingRad
+            if (th != null) {
+                // sistema: fwdX=sin(th), fwdY=cos(th) (0° = norte)
+                sin(th) to cos(th)
+            } else {
+                // último recurso: mantenha o right/fwd antigo para não “quebrar”
+                0.0 to 1.0
+            }
+        }
+        val rightX = fwdY
+        val rightY = -fwdX
+        if (paintModel == PaintModel.ARTICULADO) {
+            Log.d("ARTIC", "d=%.4f headingDeg=%s lastHeadingRad=%s fwd=(%.3f,%.3f) right=(%.3f,%.3f)"
+                .format(d, headingDeg, lastHeadingRad, fwdX, fwdY, rightX, rightY))
+        }
+        val (lastImplLocal, curImplLocal) = when (paintModel) {
+            PaintModel.ARTICULADO ->
+                computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
+                    ?: run {
+                        val longOffset = (distanciaAntena + offsetLongitudinal).toDouble()
+                        val dX = -longOffset * fwdX + offsetLateral.toDouble() * rightX
+                        val dY = -longOffset * fwdY + offsetLateral.toDouble() * rightY
+                        Coordinate(lastXY.x + dX, lastXY.y + dY) to
+                                Coordinate(curXY.x  + dX, curXY.y  + dY)
+                    }
+            else -> {
+                val longOffset = (distanciaAntena + offsetLongitudinal).toDouble()
+                val dX = -longOffset * fwdX + offsetLateral.toDouble() * rightX
+                val dY = -longOffset * fwdY + offsetLateral.toDouble() * rightY
+                Coordinate(lastXY.x + dX, lastXY.y + dY) to
+                        Coordinate(curXY.x  + dX, curXY.y  + dY)
+            }
+        }
+
+        // ângulo do implemento cacheado (para articulado)
+        if (getPaintModel() == PaintModel.ARTICULADO) {
+            val dx = curImplLocal.x - lastImplLocal.x
+            val dy = curImplLocal.y - lastImplLocal.y
+            val dd = hypot(dx, dy)
+            if (dd >= 1e-3) {
+                implThetaRad = kotlin.math.atan2(dy, dx)
+            } else if (implThetaRad == null) {
+                val th = (headingDeg ?: 0f).toDouble() * Math.PI / 180.0
+                implThetaRad = th
+            }
+        }
+
+        val (barRightX, barRightY) = when (paintModel) {
+            PaintModel.FIXO -> rightX to rightY
+            PaintModel.ARTICULADO -> {
+                val ax = axisX
+                val ay = axisY
+                if (ax != null && ay != null) {
+                    ay to -ax
+                } else {
+                    val dx = curImplLocal.x - lastImplLocal.x
+                    val dy = curImplLocal.y - lastImplLocal.y
+                    val dd = hypot(dx, dy)
+                    if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+                }
+            }
+            else -> {
+                val dx = curImplLocal.x - lastImplLocal.x
+                val dy = curImplLocal.y - lastImplLocal.y
+                val dd = hypot(dx, dy)
+                if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+            }
+        }
+
+        val p1Local = Coordinate(curImplLocal.x - half * barRightX, curImplLocal.y - half * barRightY)
+        val p2Local = Coordinate(curImplLocal.x + half * barRightX, curImplLocal.y + half * barRightY)
+        val p1LL = proj.toLatLon(p1Local)
+        val p2LL = proj.toLatLon(p2Local)
+        lastBarP1 = GeoPoint(p1LL.latitude, p1LL.longitude)
+        lastBarP2 = GeoPoint(p2LL.latitude, p2LL.longitude)
 
         val curImplLL = proj.toLatLon(curImplLocal)
-        val lastImplLL = proj.toLatLon(lastImplLocal)
+        lastImplCenterLL = GeoPoint(curImplLL.latitude, curImplLL.longitude)
 
-        val articulation = if (isArticulatedMode) getArticulationParameters() else null
-        val hitchLocal = articulation?.let { params ->
-            Coordinate(
-                curImplLocal.x - params.hitchToImplementMeters * fwdX,
-                curImplLocal.y - params.hitchToImplementMeters * fwdY,
-            )
+        pendingArticulationLocal?.let { jLocal ->
+            val jLL = proj.toLatLon(jLocal)
+            lastArticulLL = GeoPoint(jLL.latitude, jLL.longitude)
+            pendingArticulationLocal = null
         }
-        val hitchLL = hitchLocal?.let { coord ->
-            proj.toLatLon(coord).let { ll -> GeoPoint(ll.latitude, ll.longitude) }
-        }
-
-        val deltaSinceLast = hypot(curImplLocal.x - lastImplLocal.x, curImplLocal.y - lastImplLocal.y)
-
-        return GeometryResult(
-            telemetry = telemetry,
-            curImplLocal = curImplLocal,
-            lastImplLocal = lastImplLocal,
-            curImplLL = GeoPoint(curImplLL.latitude, curImplLL.longitude),
-            lastImplLL = GeoPoint(lastImplLL.latitude, lastImplLL.longitude),
-            barP1 = GeoPoint(p1LL.latitude, p1LL.longitude),
-            barP2 = GeoPoint(p2LL.latitude, p2LL.longitude),
-            hitchLL = hitchLL,
-            rightX = rightX,
-            rightY = rightY,
-            deltaSinceLast = deltaSinceLast,
-            workWidth = workWidth,
-        )
     }
 
-    protected data class ArticulationParameters(
-        val antennaToHitchMeters: Double,
-        val hitchToImplementMeters: Double,
-    )
+    protected fun rememberArticulationState(a: Double, b: Double, ax: Double, ay: Double) {
+        artA = a; artB = b
+        val n = hypot(ax, ay).coerceAtLeast(1e-9)
+        axisX = ax / n
+        axisY = ay / n
+    }
 
-    private data class GeometryResult(
-        val telemetry: ExternalTelemetry,
-        val curImplLocal: Coordinate,
-        val lastImplLocal: Coordinate,
-        val curImplLL: GeoPoint,
-        val lastImplLL: GeoPoint,
-        val barP1: GeoPoint,
-        val barP2: GeoPoint,
-        val hitchLL: GeoPoint?,
-        val rightX: Double,
-        val rightY: Double,
-        val deltaSinceLast: Double,
-        val workWidth: Double,
-    )
+    // Mapear seu PaintModel para EpochMode
+    /* fun PaintModel.toEpochMode(): RasterCoverageEngine.EpochMode =
+        when (this) {
+            PaintModel.FIXO -> RasterCoverageEngine.EpochMode.FIXO
+            PaintModel.ARTICULADO -> RasterCoverageEngine.EpochMode.ARTICULADO
+            else -> RasterCoverageEngine.EpochMode.ENTRADA
+        }*/
+
 
     override fun getStatus(): Map<String, Any> = mapOf(
         "distanciaAntena"    to distanciaAntena,
@@ -212,27 +433,28 @@ abstract class ImplementoBase(
 
     protected var implThetaRad: Double? = null
 
-    /**
-     * O monitor depende exclusivamente da pose explícita enviada pelo gateway.
-     * Não há fallback, inferência ou cálculo substitutivo. O gateway é a autoridade única de telemetria.
-     */
-
     data class ExternalTelemetry(
         val isImplementActive: Boolean,
         val activeSectionsMask: Int,
         val rateValue: Float?,
         val timestampMillis: Long,
-        val mode: String?,                     // "fixed" | "articulated"
-        val implementLatLon: GeoPoint?,        // do JSON
-        val implementHeadingRad: Double?,      // heading_deg convertido para rad
-    )
+        val articulation: Articulation? = null,
+    ) {
+        data class Articulation(
+            val antennaToJointMeters: Float?,
+            val jointToImplementMeters: Float?,
+            val jointLatLon: GeoPoint?,
+            val implementLatLon: GeoPoint?,
+            val axisX: Double?,
+            val axisY: Double?,
+            val thetaRad: Double?,
+            val hasMotion: Boolean,
+        )
+    }
 
     open fun updateExternalTelemetry(telemetry: ExternalTelemetry?) {
         latestExternalTelemetry = telemetry
         telemetryInterpolator.onTelemetry(telemetry)
-        if (telemetry == null) {
-            previousImplLocal = null
-        }
     }
 
     open class RuntimeState(var thetaRad: Double? = null, var telemetry: ExternalTelemetry? = null)
@@ -281,21 +503,18 @@ abstract class ImplementoBase(
             val elapsed = (SystemClock.elapsedRealtime() - segmentStartRealtime).coerceAtLeast(0L)
             val progress = if (duration <= 0L) 1.0 else (elapsed.toDouble() / duration).coerceIn(0.0, 1.0)
 
-            if (progress <= 0.0) return cur
+            if (progress <= 0.0 || cur.articulation?.hasMotion == false) return cur
             if (progress >= 1.0) return cur
 
-            val interpolatedPosition = interpolateGeoPoint(prev.implementLatLon, cur.implementLatLon, progress)
-            val interpolatedHeading = interpolateAngle(prev.implementHeadingRad, cur.implementHeadingRad, progress)
+            val interpolatedArticulation = interpolateArticulation(prev.articulation, cur.articulation, progress)
 
             return ExternalTelemetry(
                 isImplementActive = cur.isImplementActive,
                 activeSectionsMask = cur.activeSectionsMask,
                 rateValue = cur.rateValue,
                 timestampMillis = cur.timestampMillis,
-                mode = cur.mode,
-                implementLatLon = interpolatedPosition,
-                implementHeadingRad = interpolatedHeading,
-                )
+                articulation = interpolatedArticulation,
+            )
         }
 
         private fun computeSegmentDuration(previous: ExternalTelemetry, current: ExternalTelemetry): Long {
@@ -306,12 +525,44 @@ abstract class ImplementoBase(
             return duration.coerceAtLeast(MIN_SEGMENT_DURATION_MS)
         }
 
+        private fun interpolateArticulation(
+            previous: ExternalTelemetry.Articulation?,
+            current: ExternalTelemetry.Articulation?,
+            progress: Double,
+        ): ExternalTelemetry.Articulation? {
+            current ?: return previous
+            previous ?: return current
+
+            val axisX = interpolateDouble(previous.axisX, current.axisX, progress)
+            val axisY = interpolateDouble(previous.axisY, current.axisY, progress)
+            val norm = if (axisX != null && axisY != null) kotlin.math.hypot(axisX, axisY).coerceAtLeast(1e-9) else null
+            val normalizedAxisX = norm?.let { axisX!! / it } ?: current.axisX
+            val normalizedAxisY = norm?.let { axisY!! / it } ?: current.axisY
+
+            return ExternalTelemetry.Articulation(
+                antennaToJointMeters = current.antennaToJointMeters,
+                jointToImplementMeters = current.jointToImplementMeters,
+                jointLatLon = interpolateGeoPoint(previous.jointLatLon, current.jointLatLon, progress),
+                implementLatLon = interpolateGeoPoint(previous.implementLatLon, current.implementLatLon, progress),
+                axisX = normalizedAxisX,
+                axisY = normalizedAxisY,
+                thetaRad = interpolateAngle(previous.thetaRad, current.thetaRad, progress),
+                hasMotion = current.hasMotion,
+            )
+        }
+
         private fun interpolateGeoPoint(prev: GeoPoint?, cur: GeoPoint?, progress: Double): GeoPoint? {
             prev ?: return cur
             cur ?: return prev
             val lat = prev.latitude + (cur.latitude - prev.latitude) * progress
             val lon = prev.longitude + (cur.longitude - prev.longitude) * progress
             return GeoPoint(lat, lon)
+        }
+
+        private fun interpolateDouble(prev: Double?, cur: Double?, progress: Double): Double? {
+            prev ?: return cur
+            cur ?: return prev
+            return prev + (cur - prev) * progress
         }
 
         private fun interpolateAngle(prev: Double?, cur: Double?, progress: Double): Double? {

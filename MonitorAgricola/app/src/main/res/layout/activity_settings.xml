@@ -45,22 +45,6 @@
             android:layout_marginTop="4dp"
             android:text="@string/settings_gateway_status_disconnected" />
 
-        <androidx.appcompat.widget.SwitchCompat
-            android:id="@+id/swGatewayInterpolation"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/settings_gateway_interpolation_label" />
-
-        <TextView
-            android:id="@+id/tvGatewayInterpolationDescription"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:text="@string/settings_gateway_interpolation_description"
-            android:textColor="@android:color/darker_gray"
-            android:textSize="12sp" />
-
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
