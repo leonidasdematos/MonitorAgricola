@@ -26,6 +26,12 @@ class Plantadeira(
     private fun computeWidth(): Float = (numLinhas * espacamento).coerceAtLeast(0.05f)
     override fun getWorkWidthMeters(): Float = computeWidth()
 
+    override fun getArticulationParameters(): ArticulationParameters? {
+        val a = distAntenaArticulacao ?: return null
+        val b = distArticulacaoImplemento ?: return null
+        return ArticulationParameters(a.toDouble(), b.toDouble())
+    }
+
     override fun updateConfig(numLinhas: Int, espacamento: Float) {
         this.numLinhas = max(1, numLinhas)
         this.espacamento = espacamento.coerceAtLeast(0.01f)

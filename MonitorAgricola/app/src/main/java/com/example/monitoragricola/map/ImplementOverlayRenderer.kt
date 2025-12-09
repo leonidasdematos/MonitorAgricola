@@ -40,12 +40,14 @@ class ImplementOverlayRenderer(
 
         // 2) Link (trator -> [articulação] -> centro do implemento)
         val center = implBase.getImplementCenter()
-        if (center == null) {
+        val hitch = implBase.getImplementHitch()
+        if (center == null && hitch == null) {
             removeLink()
         } else {
             val pts = mutableListOf<GeoPoint>()
             pts += tractorPos
-            pts += center
+            hitch?.let { pts += it }
+            center?.let { pts += it }
 
             if (implementLink == null) {
                 implementLink = Polyline(map).apply {
