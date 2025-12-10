@@ -10,11 +10,11 @@ import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 
-
 abstract class ImplementoBase(
-    private val rasterEngine: RasterCoverageEngine,           // ⬅️ antes era AreaManager
+    private val rasterEngine: RasterCoverageEngine,
     protected var distanciaAntena: Float = 0f,
     protected var offsetLateral: Float = 0f,
     protected var offsetLongitudinal: Float = 0f
@@ -22,7 +22,6 @@ abstract class ImplementoBase(
 
     protected var running = false
     @Volatile private var rasterSuspended = false
-
 
     private var paintModel: PaintModel = PaintModel.ENTRADA_COMPENSADA
     fun setPaintModel(model: PaintModel) { paintModel = model }
@@ -80,7 +79,6 @@ abstract class ImplementoBase(
     @Volatile private var lastPreviewDebug: PreviewDebugInfo? = null
 
     fun consumePreviewDebugInfo(): PreviewDebugInfo? = lastPreviewDebug.also { lastPreviewDebug = null }
-
 
     protected abstract fun getWorkWidthMeters(): Float
 
@@ -171,7 +169,6 @@ abstract class ImplementoBase(
         } else {
             // Passo muito pequeno: use o heading cacheado; se não houver, assuma norte
             val th = lastHeadingRad ?: 0.0
-
             sin(th) to cos(th)
         }
         val rightX = fwdY
@@ -271,22 +268,29 @@ abstract class ImplementoBase(
                         "rasterStart=(${strokeStartLL.latitude},${strokeStartLL.longitude}) " +
                         "rasterEnd=(${strokeEndLL.latitude},${strokeEndLL.longitude}) " +
                         (startDelta?.let { "$it " } ?: "") +
-                        (endDelta ?: "")            )
+                        (endDelta ?: "")
+            )
         }
 
         var strokeRightOverride: Pair<Double, Double>? = null
-        // Barra (sempre atualiza)
+
+        // ===== Barra (sempre atualiza) =====
         val (barRightX, barRightY) = when (effectivePaintModel) {
-            PaintModel.FIXO -> rightX to rightY
+            PaintModel.FIXO -> {
+                // Implemento rígido: barra alinhada com o "right" do trator
+                rightX to rightY
+            }
             PaintModel.ARTICULADO -> {
                 val ax = axisX
                 val ay = axisY
                 if (ax != null && ay != null) {
-                    val rx = ay
-                    val ry = -ax
+                    // ✅ axisX/axisY já são o eixo da barra do implemento (como no debug)
+                    val rx = ax
+                    val ry = ay
                     strokeRightOverride = rx to ry
                     rx to ry
                 } else {
+                    // Fallback: perpendicular ao deslocamento do implemento
                     val dx = curImplLocal.x - lastImplLocal.x
                     val dy = curImplLocal.y - lastImplLocal.y
                     val d  = hypot(dx, dy)
@@ -307,7 +311,6 @@ abstract class ImplementoBase(
         val dImpl = hypot(curImplLocal.x - lastImplLocal.x, curImplLocal.y - lastImplLocal.y)
         val w = getWorkWidthMeters()
 
-
         // Pintura raster só quando rodando
         val implementActive = telemetry?.isImplementActive ?: true
 
@@ -318,7 +321,6 @@ abstract class ImplementoBase(
             val curImpl  = GeoPoint(curImplLL2.latitude,  curImplLL2.longitude)
 
             try {
-
                 rasterEngine.paintStroke(
                     last = lastImpl,
                     current = curImpl,
@@ -328,23 +330,28 @@ abstract class ImplementoBase(
                     strokeRightX = strokeRightOverride?.first,
                     strokeRightY = strokeRightOverride?.second
                 )
-
             } catch (t: Throwable) {
                 Log.e("ImplementoBase", "Falha ao pintar área (raster): ${t.message}")
             }
         }
 
+        // Atualiza endpoints da barra (para visualização no mapa principal)
         val half = (w / 2.0).toDouble()
-        val p1Local = Coordinate(curImplLocal.x - half * barRightX, curImplLocal.y - half * barRightY)
-        val p2Local = Coordinate(curImplLocal.x + half * barRightX, curImplLocal.y + half * barRightY)
+        val p1Local = Coordinate(
+            curImplLocal.x - half * barRightX,
+            curImplLocal.y - half * barRightY
+        )
+        val p2Local = Coordinate(
+            curImplLocal.x + half * barRightX,
+            curImplLocal.y + half * barRightY
+        )
         val p1LL = proj.toLatLon(p1Local)
         val p2LL = proj.toLatLon(p2Local)
         lastBarP1 = GeoPoint(p1LL.latitude, p1LL.longitude)
         lastBarP2 = GeoPoint(p2LL.latitude, p2LL.longitude)
     }
+
     private fun Double.format3() = String.format("%.3f", this)
-
-
 
     fun updateBarPreview(last: GeoPoint?, current: GeoPoint, headingDeg: Float?) {
         if (last == null) return
@@ -368,15 +375,17 @@ abstract class ImplementoBase(
                 // sistema: fwdX=sin(th), fwdY=cos(th) (0° = norte)
                 sin(th) to cos(th)
             } else {
-                // último recurso: mantenha o right/fwd antigo para não “quebrar”
                 0.0 to 1.0
             }
         }
         val rightX = fwdY
         val rightY = -fwdX
         if (paintModel == PaintModel.ARTICULADO) {
-            Log.d("ARTIC", "d=%.4f headingDeg=%s lastHeadingRad=%s fwd=(%.3f,%.3f) right=(%.3f,%.3f)"
-                .format(d, headingDeg, lastHeadingRad, fwdX, fwdY, rightX, rightY))
+            Log.d(
+                "ARTIC",
+                "d=%.4f headingDeg=%s lastHeadingRad=%s fwd=(%.3f,%.3f) right=(%.3f,%.3f)"
+                    .format(d, headingDeg, lastHeadingRad, fwdX, fwdY, rightX, rightY)
+            )
         }
         val (lastImplLocal, curImplLocal) = when (paintModel) {
             PaintModel.ARTICULADO ->
@@ -410,13 +419,15 @@ abstract class ImplementoBase(
             }
         }
 
+        // ===== Barra no preview =====
         val (barRightX, barRightY) = when (paintModel) {
             PaintModel.FIXO -> rightX to rightY
             PaintModel.ARTICULADO -> {
                 val ax = axisX
                 val ay = axisY
                 if (ax != null && ay != null) {
-                    ay to -ax
+                    // ✅ usa o eixo da barra exatamente como veio do gateway
+                    ax to ay
                 } else {
                     val dx = curImplLocal.x - lastImplLocal.x
                     val dy = curImplLocal.y - lastImplLocal.y
@@ -432,8 +443,14 @@ abstract class ImplementoBase(
             }
         }
 
-        val p1Local = Coordinate(curImplLocal.x - half * barRightX, curImplLocal.y - half * barRightY)
-        val p2Local = Coordinate(curImplLocal.x + half * barRightX, curImplLocal.y + half * barRightY)
+        val p1Local = Coordinate(
+            curImplLocal.x - half * barRightX,
+            curImplLocal.y - half * barRightY
+        )
+        val p2Local = Coordinate(
+            curImplLocal.x + half * barRightX,
+            curImplLocal.y + half * barRightY
+        )
         val p1LL = proj.toLatLon(p1Local)
         val p2LL = proj.toLatLon(p2Local)
         lastBarP1 = GeoPoint(p1LL.latitude, p1LL.longitude)
@@ -455,15 +472,6 @@ abstract class ImplementoBase(
         axisX = ax / n
         axisY = ay / n
     }
-
-    // Mapear seu PaintModel para EpochMode
-    /* fun PaintModel.toEpochMode(): RasterCoverageEngine.EpochMode =
-        when (this) {
-            PaintModel.FIXO -> RasterCoverageEngine.EpochMode.FIXO
-            PaintModel.ARTICULADO -> RasterCoverageEngine.EpochMode.ARTICULADO
-            else -> RasterCoverageEngine.EpochMode.ENTRADA
-        }*/
-
 
     override fun getStatus(): Map<String, Any> = mapOf(
         "distanciaAntena"    to distanciaAntena,
