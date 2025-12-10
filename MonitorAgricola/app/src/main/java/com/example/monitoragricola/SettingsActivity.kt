@@ -39,6 +39,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var tvGatewayDevice: TextView
     private lateinit var tvGatewayStatus: TextView
     private lateinit var swGatewayInterpolation: SwitchCompat
+    private lateinit var btnGatewayDebug: Button
     private lateinit var etNtripHost: EditText
     private lateinit var etNtripPort: EditText
     private lateinit var etNtripMount: EditText
@@ -84,6 +85,7 @@ class SettingsActivity : AppCompatActivity() {
         tvGatewayDevice = findViewById(R.id.tvGatewayDevice)
         tvGatewayStatus = findViewById(R.id.tvGatewayStatus)
         swGatewayInterpolation = findViewById(R.id.swGatewayInterpolation)
+        btnGatewayDebug = findViewById(R.id.btnGatewayDebug)
         etNtripHost = findViewById(R.id.etNtripHost)
         etNtripPort = findViewById(R.id.etNtripPort)
         etNtripMount = findViewById(R.id.etNtripMount)
@@ -93,6 +95,9 @@ class SettingsActivity : AppCompatActivity() {
         tvNtripStatus = findViewById(R.id.tvNtripStatus)
 
         btnGatewayConnect.setOnClickListener { onGatewayConnectClicked() }
+        btnGatewayDebug.setOnClickListener {
+            startActivity(Intent(this, GatewayDebugActivity::class.java))
+        }
         btnNtripConnect.setOnClickListener { onNtripConnectClicked() }
 
         loadGatewaySettings()

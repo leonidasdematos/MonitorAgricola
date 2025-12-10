@@ -40,8 +40,8 @@
             </intent-filter>
         </activity>
 
-        <!-- 👇 CORREÇÕES AQUI - Adicione o package completo .ui -->
         <activity android:name=".ui.SettingsActivity" />
+        <activity android:name=".ui.GatewayDebugActivity" android:exported="false" />
         <activity android:name=".ui.ImplementosActivity" />
         <activity android:name=".ui.NovoImplementoActivity" />
         <activity android:name=".ui.TrabalhosActivity" android:exported="false"/>
