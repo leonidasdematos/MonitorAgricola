@@ -54,9 +54,16 @@ abstract class ImplementoBase(
     private var axisX: Double? = null
     private var axisY: Double? = null
 
+    // articulação em coordenadas locais (para garantir o "T")
     private var pendingArticulationLocal: Coordinate? = null
+    private var lastArticulationLocal: Coordinate? = null
+
     protected fun rememberArticulationLocal(local: Coordinate?) {
         pendingArticulationLocal = local
+        if (local != null) {
+            // mantém em cache em coordenadas locais para cálculo da barra
+            lastArticulationLocal = local
+        }
     }
 
     data class PreviewDebugInfo(
@@ -136,6 +143,13 @@ abstract class ImplementoBase(
         }
     }
 
+    private fun wrapAngle(angle: Double): Double {
+        var a = angle % (2 * Math.PI)
+        if (a <= -Math.PI) a += 2 * Math.PI
+        if (a > Math.PI) a -= 2 * Math.PI
+        return a
+    }
+
     override fun updatePosition(
         last: GeoPoint?,
         current: GeoPoint,
@@ -155,9 +169,24 @@ abstract class ImplementoBase(
 
         // Atualize o heading SEMPRE que houver qualquer variação mensurável
         val headingRadFromPose = headingDeg?.takeIf { it.isFinite() }?.toDouble()?.let { Math.toRadians(it) }
-        headingRadFromPose?.let { lastHeadingRad = it }
 
         val headingStep = minHeadingStep(speedMps, headingRadFromPose != null)
+
+        headingRadFromPose?.let { poseHeading ->
+            val prev = lastHeadingRad
+            val distSinceLast = dist
+            val headingDelta = prev?.let { wrapAngle(poseHeading - it) }
+
+            // Quando o deslocamento é mínimo e o heading varia demais (glitch de 1-2 frames),
+            // mantenha o heading anterior para não "puxar" o rastro para fora do implemento.
+            val isSmallMove = distSinceLast < max(EPS_STEP, headingStep)
+            val isJump = headingDelta?.let { abs(it) > Math.toRadians(20.0) } ?: false
+
+            if (!isSmallMove || !isJump) {
+                lastHeadingRad = poseHeading
+            }
+        }
+
         val useDisplacementForHeading = dist >= headingStep
         if (useDisplacementForHeading) {
             lastHeadingRad = atan2(vx, vy)
@@ -281,22 +310,54 @@ abstract class ImplementoBase(
                 rightX to rightY
             }
             PaintModel.ARTICULADO -> {
-                val ax = axisX
-                val ay = axisY
-                if (ax != null && ay != null) {
-                    // ✅ axisX/axisY já são o eixo da barra do implemento (como no debug)
-                    val rx = ax
-                    val ry = ay
-                    strokeRightOverride = rx to ry
-                    rx to ry
+                val j = lastArticulationLocal
+                if (j != null) {
+                    // ✅ Garante formato de T: barra ⟂ (articulação → implemento)
+                    val vxJ = curImplLocal.x - j.x
+                    val vyJ = curImplLocal.y - j.y
+                    val dJ  = hypot(vxJ, vyJ)
+                    if (dJ >= EPS_IMPL) {
+                        val alongX = vxJ / dJ
+                        val alongY = vyJ / dJ
+                        val rx = -alongY
+                        val ry = alongX
+                        strokeRightOverride = rx to ry
+                        rx to ry
+                    } else {
+                        // fallback se a geometria estiver degenerada
+                        val ax = axisX
+                        val ay = axisY
+                        if (ax != null && ay != null) {
+                            val rx = ax
+                            val ry = ay
+                            strokeRightOverride = rx to ry
+                            rx to ry
+                        } else {
+                            val dx = curImplLocal.x - lastImplLocal.x
+                            val dy = curImplLocal.y - lastImplLocal.y
+                            val d  = hypot(dx, dy)
+                            val fallback = if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+                            strokeRightOverride = fallback
+                            fallback
+                        }
+                    }
                 } else {
-                    // Fallback: perpendicular ao deslocamento do implemento
-                    val dx = curImplLocal.x - lastImplLocal.x
-                    val dy = curImplLocal.y - lastImplLocal.y
-                    val d  = hypot(dx, dy)
-                    val fallback = if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
-                    strokeRightOverride = fallback
-                    fallback
+                    // Se por algum motivo ainda não temos articulação, cai no comportamento antigo
+                    val ax = axisX
+                    val ay = axisY
+                    if (ax != null && ay != null) {
+                        val rx = ax
+                        val ry = ay
+                        strokeRightOverride = rx to ry
+                        rx to ry
+                    } else {
+                        val dx = curImplLocal.x - lastImplLocal.x
+                        val dy = curImplLocal.y - lastImplLocal.y
+                        val d  = hypot(dx, dy)
+                        val fallback = if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
+                        strokeRightOverride = fallback
+                        fallback
+                    }
                 }
             }
             else -> {
@@ -380,30 +441,68 @@ abstract class ImplementoBase(
         }
         val rightX = fwdY
         val rightY = -fwdX
-        if (paintModel == PaintModel.ARTICULADO) {
+
+        val telemetry = telemetryInterpolator.current()
+        val effectivePaintModel = telemetry?.mode?.let { PaintModel.fromKey(it) } ?: paintModel
+        if (effectivePaintModel == PaintModel.ARTICULADO) {
             Log.d(
                 "ARTIC",
                 "d=%.4f headingDeg=%s lastHeadingRad=%s fwd=(%.3f,%.3f) right=(%.3f,%.3f)"
                     .format(d, headingDeg, lastHeadingRad, fwdX, fwdY, rightX, rightY)
             )
         }
-        val (lastImplLocal, curImplLocal) = when (paintModel) {
-            PaintModel.ARTICULADO ->
-                computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
+        val articulationTelemetry = telemetry?.articulation?.takeIf { it.hasMotion }
+        val useGatewayArticulation = articulationTelemetry != null &&
+                (effectivePaintModel == PaintModel.ARTICULADO || telemetry.mode?.equals("articulated", ignoreCase = true) == true)
+
+        val articulatedPair = if (useGatewayArticulation) {
+            articulationTelemetry?.let { art ->
+                val currentImplLL = art.implementLatLon
+                val currentImplLocal = currentImplLL?.let { proj.toLocalMeters(it) }
+
                     ?: run {
-                        val longOffset = (distanciaAntena + offsetLongitudinal).toDouble()
-                        val dX = -longOffset * fwdX + offsetLateral.toDouble() * rightX
-                        val dY = -longOffset * fwdY + offsetLateral.toDouble() * rightY
-                        Coordinate(lastXY.x + dX, lastXY.y + dY) to
-                                Coordinate(curXY.x  + dX, curXY.y  + dY)
+                        val x = art.implementLocalX
+                        val y = art.implementLocalY
+                        if (x != null && y != null) Coordinate(curXY.x + x, curXY.y + y) else null
                     }
-            else -> {
-                val longOffset = (distanciaAntena + offsetLongitudinal).toDouble()
-                val dX = -longOffset * fwdX + offsetLateral.toDouble() * rightX
-                val dY = -longOffset * fwdY + offsetLateral.toDouble() * rightY
-                Coordinate(lastXY.x + dX, lastXY.y + dY) to
-                        Coordinate(curXY.x  + dX, curXY.y  + dY)
+                if (currentImplLocal != null) {
+                    val previousImplLocal = lastImplCenterLL?.let { proj.toLocalMeters(it) } ?: currentImplLocal
+                    art.jointLatLon?.let { jointLL ->
+                        rememberArticulationLocal(proj.toLocalMeters(jointLL))
+                    } ?: run {
+                        val x = art.jointLocalX
+                        val y = art.jointLocalY
+                        if (x != null && y != null) {
+                            rememberArticulationLocal(Coordinate(curXY.x + x, curXY.y + y))
+                        }
+                    }
+                    art.thetaRad?.let { implThetaRad = it }
+
+                    val axisXValue = art.axisX
+                    val axisYValue = art.axisY
+                    art.antennaToJointMeters?.toDouble()?.let { value -> artA = value }
+                    art.jointToImplementMeters?.toDouble()?.let { value -> artB = value }
+                    val aValue = artA
+                    val bValue = artB
+                    if (axisXValue != null && axisYValue != null && aValue != null && bValue != null) {
+                        rememberArticulationState(aValue, bValue, axisXValue, axisYValue)
+                    } else if (axisXValue != null && axisYValue != null) {
+                        val norm = hypot(axisXValue, axisYValue).coerceAtLeast(1e-9)
+                        this.axisX = axisXValue / norm
+                        this.axisY = axisYValue / norm
+                    }
+
+                    previousImplLocal to currentImplLocal
+                } else null
             }
+        } else null
+
+        val (lastImplLocal, curImplLocal) = when {
+            articulatedPair != null -> articulatedPair
+            effectivePaintModel == PaintModel.ARTICULADO ->
+                computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
+                    ?: computeRigidCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
+            else -> computeRigidCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
         }
 
         // ângulo do implemento cacheado (para articulado)
@@ -420,19 +519,44 @@ abstract class ImplementoBase(
         }
 
         // ===== Barra no preview =====
-        val (barRightX, barRightY) = when (paintModel) {
+        val (barRightX, barRightY) = when (effectivePaintModel) {
             PaintModel.FIXO -> rightX to rightY
             PaintModel.ARTICULADO -> {
-                val ax = axisX
-                val ay = axisY
-                if (ax != null && ay != null) {
-                    // ✅ usa o eixo da barra exatamente como veio do gateway
-                    ax to ay
+                val j = lastArticulationLocal
+                if (j != null) {
+                    // Mesmo T do modelo principal
+                    val vxJ = curImplLocal.x - j.x
+                    val vyJ = curImplLocal.y - j.y
+                    val dJ  = hypot(vxJ, vyJ)
+                    if (dJ >= EPS_IMPL) {
+                        val alongX = vxJ / dJ
+                        val alongY = vyJ / dJ
+                        val rx = -alongY
+                        val ry = alongX
+                        rx to ry
+                    } else {
+                        val ax = axisX
+                        val ay = axisY
+                        if (ax != null && ay != null) {
+                            ax to ay
+                        } else {
+                            val dx = curImplLocal.x - lastImplLocal.x
+                            val dy = curImplLocal.y - lastImplLocal.y
+                            val dd = hypot(dx, dy)
+                            if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+                        }
+                    }
                 } else {
-                    val dx = curImplLocal.x - lastImplLocal.x
-                    val dy = curImplLocal.y - lastImplLocal.y
-                    val dd = hypot(dx, dy)
-                    if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+                    val ax = axisX
+                    val ay = axisY
+                    if (ax != null && ay != null) {
+                        ax to ay
+                    } else {
+                        val dx = curImplLocal.x - lastImplLocal.x
+                        val dy = curImplLocal.y - lastImplLocal.y
+                        val dd = hypot(dx, dy)
+                        if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
+                    }
                 }
             }
             else -> {
@@ -666,3 +790,4 @@ abstract class ImplementoBase(
         }
     }
 }
+
