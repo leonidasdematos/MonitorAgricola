@@ -95,6 +95,8 @@ import com.example.monitoragricola.hardware.gateway.ExternalGatewayPositionProvi
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionConfig
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionMedium
 import com.example.monitoragricola.hardware.gateway.GatewayConnectionPreferences
+import com.example.monitoragricola.hardware.gateway.GatewaySettings
+import com.example.monitoragricola.hardware.gateway.GatewaySettingsPreferences
 import com.example.monitoragricola.hardware.gateway.GatewayPoseInterpolator
 import com.example.monitoragricola.hardware.gateway.toGatewayConfiguration
 import com.example.monitoragricola.map.ImplementOverlayDebugTracer
@@ -249,6 +251,7 @@ class MainActivity : AppCompatActivity() {
     private var gatewaySyncJob: Job? = null
     private var latestPose: GpsPose? = null
     private var gpsFilterSettings: GpsFilterSettings = GpsFilterSettings()
+    private var gatewaySettings: GatewaySettings = GatewaySettings()
 
     private var lastSpeedCalcTime: Long = 0
     private var lastSpeedPoint: GeoPoint? = null
@@ -1240,7 +1243,7 @@ class MainActivity : AppCompatActivity() {
                 val rawFixMillis = externalGatewayProvider?.latestPose()?.timestampMillis ?: 0L
                 positionProvider?.getCurrentPosition()?.let { pos ->
                     val poseSnapshot = latestPose
-                    val smoothingResult = if (positionProvider === externalGatewayProvider) {
+                    val smoothingResult = if (positionProvider === externalGatewayProvider && gatewaySettings.interpolateGatewayPoses) {
                         gatewayPoseInterpolator?.current(now)
                     } else {
                         null
@@ -1254,11 +1257,15 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity, "Sinal de posição restabelecido", Toast.LENGTH_SHORT).show()
                     }
 
-                    val nextPosition = smoothingResult?.position ?: interpolatedPosition?.let {
-                        val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
-                        val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
-                        GeoPoint(lat, lon)
-                    } ?: pos
+                    val nextPosition = if (positionProvider === externalGatewayProvider && !gatewaySettings.interpolateGatewayPoses) {
+                        pos
+                    } else {
+                        smoothingResult?.position ?: interpolatedPosition?.let {
+                            val lat = it.latitude + interpolationFactor * (pos.latitude - it.latitude)
+                            val lon = it.longitude + interpolationFactor * (pos.longitude - it.longitude)
+                            GeoPoint(lat, lon)
+                        } ?: pos
+                    }
 
                     interpolatedPosition = nextPosition
 
@@ -2400,9 +2407,17 @@ class MainActivity : AppCompatActivity() {
     /* ======================= Permissão / providers ======================= */
 
     private fun startExternalGatewayProvider(forceReconnect: Boolean = false) {
+        gatewaySettings = GatewaySettingsPreferences.read(this)
+        val shouldInterpolateGatewayPoses = gatewaySettings.interpolateGatewayPoses
+
         if (!forceReconnect && externalGatewayProvider != null) {
             positionProvider = externalGatewayProvider
             externalGatewayProvider?.start()
+            gatewayPoseInterpolator = if (shouldInterpolateGatewayPoses) {
+                (gatewayPoseInterpolator ?: GatewayPoseInterpolator()).also { it.reset() }
+            } else {
+                null
+            }
             applyImplementToPositionSources(lastAppliedImplementoSnapshot)
             return
         }
@@ -2428,7 +2443,11 @@ class MainActivity : AppCompatActivity() {
         externalGatewayProvider = provider
         positionProvider = provider
         latestPose = null
-        gatewayPoseInterpolator = GatewayPoseInterpolator().also { it.reset() }
+        gatewayPoseInterpolator = if (gatewaySettings.interpolateGatewayPoses) {
+            GatewayPoseInterpolator().also { it.reset() }
+        } else {
+            null
+        }
         interpolatedPosition = null
 
         val snapshot = lastAppliedImplementoSnapshot
@@ -2464,6 +2483,12 @@ class MainActivity : AppCompatActivity() {
                             ExternalTelemetry.Articulation(
                                 antennaToJointMeters = art.antennaToJointMeters,
                                 jointToImplementMeters = art.jointToImplementMeters,
+                                antennaLocalX = art.antennaLocalX,
+                                antennaLocalY = art.antennaLocalY,
+                                jointLocalX = art.jointLocalX,
+                                jointLocalY = art.jointLocalY,
+                                implementLocalX = art.implementLocalX,
+                                implementLocalY = art.implementLocalY,
                                 jointLatLon = jointPoint,
                                 implementLatLon = implementPoint,
                                 axisX = art.axisX,
@@ -2482,6 +2507,7 @@ class MainActivity : AppCompatActivity() {
                             activeSectionsMask = telemetry.activeSectionsMask,
                             rateValue = telemetry.rateValue,
                             timestampMillis = telemetry.timestampMillis,
+                            mode = telemetry.mode,
                             articulation = articulation,
                         )
                     )
@@ -2496,7 +2522,9 @@ class MainActivity : AppCompatActivity() {
                 latestPose = pose
                 lastPositionMillis = pose.timestampMillis
                 speedEmaKmh = pose.speedMps * 3.6
-                gatewayPoseInterpolator?.onPose(pose)
+                if (gatewaySettings.interpolateGatewayPoses) {
+                    gatewayPoseInterpolator?.onPose(pose)
+                }
                 updateGpsAccuracyIndicator(pose)
             }
         }

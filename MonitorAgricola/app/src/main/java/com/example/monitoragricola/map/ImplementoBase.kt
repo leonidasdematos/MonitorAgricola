@@ -178,14 +178,29 @@ abstract class ImplementoBase(
         val rightY = -fwdX
 
         val telemetry = telemetryInterpolator.current()
-        val articulatedPair = if (paintModel == PaintModel.ARTICULADO) {
-            telemetry?.articulation?.let { art ->
+        val effectivePaintModel = telemetry?.mode?.let { PaintModel.fromKey(it) } ?: paintModel
+        val articulationTelemetry = telemetry?.articulation?.takeIf { it.hasMotion }
+        val useGatewayArticulation = articulationTelemetry != null &&
+                (effectivePaintModel == PaintModel.ARTICULADO || telemetry.mode?.equals("articulated", ignoreCase = true) == true)
+        val articulatedPair = if (useGatewayArticulation) {
+            articulationTelemetry?.let { art ->
                 val currentImplLL = art.implementLatLon
                 val currentImplLocal = currentImplLL?.let { proj.toLocalMeters(it) }
+                    ?: run {
+                        val x = art.implementLocalX
+                        val y = art.implementLocalY
+                        if (x != null && y != null) Coordinate(curXY.x + x, curXY.y + y) else null
+                    }
                 if (currentImplLocal != null) {
                     val previousImplLocal = lastImplCenterLL?.let { proj.toLocalMeters(it) } ?: currentImplLocal
                     art.jointLatLon?.let { jointLL ->
                         rememberArticulationLocal(proj.toLocalMeters(jointLL))
+                    } ?: run {
+                        val x = art.jointLocalX
+                        val y = art.jointLocalY
+                        if (x != null && y != null) {
+                            rememberArticulationLocal(Coordinate(curXY.x + x, curXY.y + y))
+                        }
                     }
                     art.thetaRad?.let { implThetaRad = it }
 
@@ -215,7 +230,7 @@ abstract class ImplementoBase(
         // Centros do implemento conforme o modo (continua atualizando mesmo pausado)
         val (lastImplLocal, curImplLocal) = when {
             articulatedPair != null -> articulatedPair
-            paintModel == PaintModel.ARTICULADO ->
+            effectivePaintModel == PaintModel.ARTICULADO ->
                 computeArticulatedCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
                     ?: run {
                         computeRigidCenters(lastXY, curXY, fwdX, fwdY, rightX, rightY)
@@ -232,9 +247,36 @@ abstract class ImplementoBase(
             pendingArticulationLocal = null
         }
 
+        if (telemetry != null) {
+            val mode = telemetry.mode ?: effectivePaintModel.key
+            val implFromGateway = articulationTelemetry?.implementLatLon
+            val implGatewayLocal = implFromGateway?.let { proj.toLocalMeters(it) }
+            val strokeStartLL = proj.toLatLon(lastImplLocal)
+            val strokeEndLL = proj.toLatLon(curImplLocal)
+
+            val startDelta = implGatewayLocal?.let {
+                "dRasterStart=(${(lastImplLocal.x - it.x).format3()},${(lastImplLocal.y - it.y).format3()})m"
+            }
+            val endDelta = implGatewayLocal?.let {
+                "dRasterEnd=(${(curImplLocal.x - it.x).format3()},${(curImplLocal.y - it.y).format3()})m"
+            }
+
+            Log.i(
+                "ArticulationDebug",
+                "mode=$mode paintModel=${effectivePaintModel.name.lowercase()} " +
+                        "tractor=(${current.latitude},${current.longitude}) " +
+                        "implGateway=${implFromGateway?.let { "(${it.latitude},${it.longitude})" }} " +
+                        "implGatewayLocal=${implGatewayLocal?.let { "(${it.x.format3()},${it.y.format3()})" }} " +
+                        "implCenterUsed=(${curImplLL.latitude},${curImplLL.longitude}) " +
+                        "rasterStart=(${strokeStartLL.latitude},${strokeStartLL.longitude}) " +
+                        "rasterEnd=(${strokeEndLL.latitude},${strokeEndLL.longitude}) " +
+                        (startDelta?.let { "$it " } ?: "") +
+                        (endDelta ?: "")            )
+        }
+
         var strokeRightOverride: Pair<Double, Double>? = null
         // Barra (sempre atualiza)
-        val (barRightX, barRightY) = when (paintModel) {
+        val (barRightX, barRightY) = when (effectivePaintModel) {
             PaintModel.FIXO -> rightX to rightY
             PaintModel.ARTICULADO -> {
                 val ax = axisX
@@ -438,11 +480,18 @@ abstract class ImplementoBase(
         val activeSectionsMask: Int,
         val rateValue: Float?,
         val timestampMillis: Long,
+        val mode: String? = null,
         val articulation: Articulation? = null,
     ) {
         data class Articulation(
             val antennaToJointMeters: Float?,
             val jointToImplementMeters: Float?,
+            val antennaLocalX: Double?,
+            val antennaLocalY: Double?,
+            val jointLocalX: Double?,
+            val jointLocalY: Double?,
+            val implementLocalX: Double?,
+            val implementLocalY: Double?,
             val jointLatLon: GeoPoint?,
             val implementLatLon: GeoPoint?,
             val axisX: Double?,
@@ -513,6 +562,7 @@ abstract class ImplementoBase(
                 activeSectionsMask = cur.activeSectionsMask,
                 rateValue = cur.rateValue,
                 timestampMillis = cur.timestampMillis,
+                mode = cur.mode,
                 articulation = interpolatedArticulation,
             )
         }
@@ -530,7 +580,7 @@ abstract class ImplementoBase(
             current: ExternalTelemetry.Articulation?,
             progress: Double,
         ): ExternalTelemetry.Articulation? {
-            current ?: return previous
+            if (current == null) return null
             previous ?: return current
 
             val axisX = interpolateDouble(previous.axisX, current.axisX, progress)
@@ -542,6 +592,12 @@ abstract class ImplementoBase(
             return ExternalTelemetry.Articulation(
                 antennaToJointMeters = current.antennaToJointMeters,
                 jointToImplementMeters = current.jointToImplementMeters,
+                antennaLocalX = interpolateDouble(previous.antennaLocalX, current.antennaLocalX, progress),
+                antennaLocalY = interpolateDouble(previous.antennaLocalY, current.antennaLocalY, progress),
+                jointLocalX = interpolateDouble(previous.jointLocalX, current.jointLocalX, progress),
+                jointLocalY = interpolateDouble(previous.jointLocalY, current.jointLocalY, progress),
+                implementLocalX = interpolateDouble(previous.implementLocalX, current.implementLocalX, progress),
+                implementLocalY = interpolateDouble(previous.implementLocalY, current.implementLocalY, progress),
                 jointLatLon = interpolateGeoPoint(previous.jointLatLon, current.jointLatLon, progress),
                 implementLatLon = interpolateGeoPoint(previous.implementLatLon, current.implementLatLon, progress),
                 axisX = normalizedAxisX,
