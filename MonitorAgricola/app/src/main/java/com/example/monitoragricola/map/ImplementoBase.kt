@@ -205,7 +205,7 @@ abstract class ImplementoBase(
 
         val telemetry = telemetryInterpolator.current()
         val effectivePaintModel = telemetry?.mode?.let { PaintModel.fromKey(it) } ?: paintModel
-        val articulationTelemetry = telemetry?.articulation?.takeIf { it.hasMotion }
+        val articulationTelemetry = telemetry?.articulation
         val useGatewayArticulation = articulationTelemetry != null &&
                 (effectivePaintModel == PaintModel.ARTICULADO || telemetry.mode?.equals("articulated", ignoreCase = true) == true)
         val articulatedPair = if (useGatewayArticulation) {
@@ -310,55 +310,15 @@ abstract class ImplementoBase(
                 rightX to rightY
             }
             PaintModel.ARTICULADO -> {
-                val j = lastArticulationLocal
-                if (j != null) {
-                    // ✅ Garante formato de T: barra ⟂ (articulação → implemento)
-                    val vxJ = curImplLocal.x - j.x
-                    val vyJ = curImplLocal.y - j.y
-                    val dJ  = hypot(vxJ, vyJ)
-                    if (dJ >= EPS_IMPL) {
-                        val alongX = vxJ / dJ
-                        val alongY = vyJ / dJ
-                        val rx = -alongY
-                        val ry = alongX
-                        strokeRightOverride = rx to ry
-                        rx to ry
-                    } else {
-                        // fallback se a geometria estiver degenerada
-                        val ax = axisX
-                        val ay = axisY
-                        if (ax != null && ay != null) {
-                            val rx = ax
-                            val ry = ay
-                            strokeRightOverride = rx to ry
-                            rx to ry
-                        } else {
-                            val dx = curImplLocal.x - lastImplLocal.x
-                            val dy = curImplLocal.y - lastImplLocal.y
-                            val d  = hypot(dx, dy)
-                            val fallback = if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
-                            strokeRightOverride = fallback
-                            fallback
-                        }
-                    }
-                } else {
-                    // Se por algum motivo ainda não temos articulação, cai no comportamento antigo
-                    val ax = axisX
-                    val ay = axisY
-                    if (ax != null && ay != null) {
-                        val rx = ax
-                        val ry = ay
-                        strokeRightOverride = rx to ry
-                        rx to ry
-                    } else {
-                        val dx = curImplLocal.x - lastImplLocal.x
-                        val dy = curImplLocal.y - lastImplLocal.y
-                        val d  = hypot(dx, dy)
-                        val fallback = if (d >= EPS_IMPL) (dy / d) to (-dx / d) else (rightX to rightY)
-                        strokeRightOverride = fallback
-                        fallback
-                    }
-                }
+                val vec = articulatedRightVector(
+                    curImplLocal = curImplLocal,
+                    lastImplLocal = lastImplLocal,
+                    articulationLocal = lastArticulationLocal,
+                    defaultRight = rightX to rightY,
+                    preferAxis = useGatewayArticulation,
+                )
+                strokeRightOverride = vec
+                vec
             }
             else -> {
                 val dx = curImplLocal.x - lastImplLocal.x
@@ -451,7 +411,7 @@ abstract class ImplementoBase(
                     .format(d, headingDeg, lastHeadingRad, fwdX, fwdY, rightX, rightY)
             )
         }
-        val articulationTelemetry = telemetry?.articulation?.takeIf { it.hasMotion }
+        val articulationTelemetry = telemetry?.articulation
         val useGatewayArticulation = articulationTelemetry != null &&
                 (effectivePaintModel == PaintModel.ARTICULADO || telemetry.mode?.equals("articulated", ignoreCase = true) == true)
 
@@ -521,44 +481,13 @@ abstract class ImplementoBase(
         // ===== Barra no preview =====
         val (barRightX, barRightY) = when (effectivePaintModel) {
             PaintModel.FIXO -> rightX to rightY
-            PaintModel.ARTICULADO -> {
-                val j = lastArticulationLocal
-                if (j != null) {
-                    // Mesmo T do modelo principal
-                    val vxJ = curImplLocal.x - j.x
-                    val vyJ = curImplLocal.y - j.y
-                    val dJ  = hypot(vxJ, vyJ)
-                    if (dJ >= EPS_IMPL) {
-                        val alongX = vxJ / dJ
-                        val alongY = vyJ / dJ
-                        val rx = -alongY
-                        val ry = alongX
-                        rx to ry
-                    } else {
-                        val ax = axisX
-                        val ay = axisY
-                        if (ax != null && ay != null) {
-                            ax to ay
-                        } else {
-                            val dx = curImplLocal.x - lastImplLocal.x
-                            val dy = curImplLocal.y - lastImplLocal.y
-                            val dd = hypot(dx, dy)
-                            if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
-                        }
-                    }
-                } else {
-                    val ax = axisX
-                    val ay = axisY
-                    if (ax != null && ay != null) {
-                        ax to ay
-                    } else {
-                        val dx = curImplLocal.x - lastImplLocal.x
-                        val dy = curImplLocal.y - lastImplLocal.y
-                        val dd = hypot(dx, dy)
-                        if (dd >= 0.01) (dy / dd) to (-dx / dd) else (rightX to rightY)
-                    }
-                }
-            }
+            PaintModel.ARTICULADO -> articulatedRightVector(
+                curImplLocal = curImplLocal,
+                lastImplLocal = lastImplLocal,
+                articulationLocal = lastArticulationLocal,
+                defaultRight = rightX to rightY,
+                preferAxis = useGatewayArticulation,
+            )
             else -> {
                 val dx = curImplLocal.x - lastImplLocal.x
                 val dy = curImplLocal.y - lastImplLocal.y
@@ -596,6 +525,39 @@ abstract class ImplementoBase(
         axisX = ax / n
         axisY = ay / n
     }
+
+    private fun articulatedRightVector(
+        curImplLocal: Coordinate,
+        lastImplLocal: Coordinate,
+        articulationLocal: Coordinate?,
+        defaultRight: Pair<Double, Double>,
+        preferAxis: Boolean,
+    ): Pair<Double, Double> {
+        articulationLocal?.let { j ->
+            val vxJ = curImplLocal.x - j.x
+            val vyJ = curImplLocal.y - j.y
+            val dJ  = hypot(vxJ, vyJ)
+            if (dJ >= EPS_IMPL) {
+                return (-vyJ / dJ) to (vxJ / dJ)
+            }
+        }
+
+        val ax = axisX
+        val ay = axisY
+        if (ax != null && ay != null) {
+            return ax to ay
+        }
+
+        val dx = curImplLocal.x - lastImplLocal.x
+        val dy = curImplLocal.y - lastImplLocal.y
+        val d  = hypot(dx, dy)
+        if (!preferAxis && d >= EPS_IMPL) {
+            return (dy / d) to (-dx / d)
+        }
+
+        return defaultRight
+    }
+
 
     override fun getStatus(): Map<String, Any> = mapOf(
         "distanciaAntena"    to distanciaAntena,
